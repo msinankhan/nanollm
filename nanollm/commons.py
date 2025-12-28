@@ -49,7 +49,7 @@ def get_base_dir():
     if os.environ.get("NANOLLM_BASE_DIR"):
         nanollm_dir=os.environ.get('NANOLLM_BASE_DIR')
     else:
-        home_dir=os.path.expanduser("/disk2")
+        home_dir=os.path.expanduser("~")
         cache_dir=os.path.join(home_dir, ".cache")
         nanollm_dir=os.path.join(cache_dir,"nanollm")
 
@@ -70,7 +70,7 @@ def download_data_with_lock(url, filename, postprocess_fn=None):
         return file_path
     
     with FileLock(lock_path):
-        if os.path.exists(lock_path):
+        if os.path.exists(file_path):
             return file_path
         
         print(f"Downloading {url}...")
@@ -88,6 +88,11 @@ def download_data_with_lock(url, filename, postprocess_fn=None):
 
 
 def print0(s="",**kwargs):
+    """
+    The RANK environment variable is set by torchrun when launching distributed training with multiple GPUs
+
+    This pattern ensures clean, non-duplicated logging output in distributed training scenarios
+    """
     ddp_rank=int(os.environ.get('RANK',0))
 
     if ddp_rank==0:
@@ -106,4 +111,75 @@ def print_banner():
         //      ///  //////// ///   //  //////  /// /// ///  //  // 
 
         """
-    print0(banner)
+    print0(banner) 
+
+def is_ddp_requested() -> bool:
+    return all(k in os.environ for k in ('RANK','LOCAL_RANK','WORLD_SIZE'))
+
+def is_ddp_initialized() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+def get_dist_info():
+    if is_ddp_requested():
+        assert all (var in os.environ for var in ['RANK', 'LOCAL_RANK', 'WORLD_SIZE'])
+
+        ddp_rank=int(os.environ.get('RANK'))
+        ddp_local_rank=int(os.environ['LOCAL_RANK'])
+        ddp_world_size=int(os.environ['WORLD_SIZE'])
+        return True, ddp_rank, ddp_local_rank, ddp_world_size
+    else:
+        return False,0,0,1
+    
+
+def detect_device_type():
+    if torch.cuda.is_available():
+        device_type='cuda'
+    else:
+        device_type='cpu'
+    print0(f"Auto Detected device_type {device_type}")
+
+def compute_init(device_type='cuda'):
+
+    assert device_type in ["cuda", "cpu"], "Unsuported Device Type"
+
+    if device_type=='cuda':
+        assert torch.cuda.is_available() , "Your PyTorch installation is not configured for CUDA but device_type is 'cuda'"
+
+
+    # PyTorch has two RNGs:
+    # CPU RNG
+    # CUDA RNG
+    torch.manual_seed(42)
+    if device_type=='cuda':
+        torch.cuda.manual_seed(42) #CUDA has its own RNG, separate from the CPU RNG. Without this:
+                                   # CPU and GPU randomness diverge
+                                   # Different ranks may initialize differently
+
+    
+
+    if device_type=='cuda':
+        torch.backends.cuda.matmul.fp32_precision='tf32'
+
+
+    is_ddp_requested, ddp_rank,ddp_local_rank,ddp_world_size= get_dist_info()
+
+    if is_ddp_initialized and device_type=='cuda':
+        device=torch.device('cuda', ddp_rank) #Initializes as cuda:0, cuda:1, cuda:2 etc
+        torch.cuda.set_device(device)
+        dist.init_process_group(backend='nccl',device_id=device) #Creates communication channels between processes
+        dist.barrier() #This forces all processes to wait until everyone has finished initialization
+
+    else:
+        torch.device(device_type)
+
+    if ddp_rank==0:
+        logger.info(f"Distribute world size: {ddp_world_size}")
+
+
+    return is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size, device
+
+
+def compute_cleanup():
+    if is_ddp_initialized():
+        dist.destroy_process_group()
+
