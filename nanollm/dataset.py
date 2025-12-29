@@ -1,7 +1,7 @@
 import os
 import time
 import argparse
-import requests
+import requests 
 import pyarrow.parquet as pq
 from multiprocessing import Pool
 
@@ -33,7 +33,7 @@ def list_parquet_files(data_dir=None):
 def parquet_iter_batches(split,start=0,step=1):
 
     assert split in ["train" , "val"], "Invalid split, must be 'train' or 'val'."
-    parquet_batches=list_parquet_files()
+    parquet_paths=list_parquet_files()
     parquet_paths=parquet_paths[:-1] if split=='train' else parquet_paths[-1:]
 
     for file in parquet_paths:
