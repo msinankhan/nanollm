@@ -22,7 +22,7 @@ def list_parquet_files(data_dir=None):
     data_dir=DATA_DIR if data_dir is None else data_dir
 
     parquet_files=sorted([
-        f for f in data_dir if f.endswith('.parquet') and not f.endswith('.tmp')
+        f for f in os.listdir(data_dir)if f.endswith('.parquet') and not f.endswith('.tmp')
     ])
 
     parquet_paths=[os.path.join(data_dir,f) for f in parquet_files]
@@ -64,13 +64,14 @@ def download_single_file(index):
             response.raise_for_status()
 
 
-            temp_path=filename +f".tmp"
+            temp_path=file_path +f".tmp"
 
             with open(temp_path,'wb') as f:
                 for chunk in response.iter_content(chunk_size=1024*1024):
-                    f.write(chunk)
+                    if chunk:
+                        f.write(chunk)
 
-            os.rename(temp_path,filename)
+            os.rename(temp_path,file_path)
 
             print(f"Sucessfully Downloaded {filename}")
 
@@ -79,7 +80,7 @@ def download_single_file(index):
             print(f"Attempt {attempt}/{max_attempts} failed for {filename} : {e}")
 
             for path in [file_path +f".tmp",file_path]:
-                if os.path.exists:
+                if os.path.exists(path):
                     try:
                         os.remove(path)
                     except:
