@@ -37,7 +37,7 @@ class RustBPETokenizer:
 
         tokenizer.train_from_iterator(text_iterator,vocab_size_no_special,pattern=SPLIT_PATTERN)
 
-        pattern=tokenizer.get_pattern()
+        pattern=tokenizer.get_pattern() # To Rust is using fancy_regex, which: **May** internally normalize behavior and **May** differ subtly in Unicode handling. The effective pattern is the one Rust accepted and stored.
         mergeable_ranks_list=tokenizer.get_mergeable_ranks()
 
         mergeable_ranks={bytes(k):v for k,v in mergeable_ranks_list}
