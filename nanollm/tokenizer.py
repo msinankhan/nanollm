@@ -35,9 +35,9 @@ class RustBPETokenizer:
 
         assert vocab_size_no_special >=256, f"vocab_size_no_special should be atleast 256 but got {vocab_size_no_special}"
 
-        tokenizer.train_from_iterator(text_iterator,vocab_size_no_special,pattern=SPLIT_PATTERN)
+        tokenizer.train_from_iterator(text_iterator,vocab_size_no_special,pattern=SPLIT_PATTERN) #THIS LINE IS WHERE TRAINING HAPPENS.
 
-        pattern=tokenizer.get_pattern() # To Rust is using fancy_regex, which: **May** internally normalize behavior and **May** differ subtly in Unicode handling. The effective pattern is the one Rust accepted and stored.
+        pattern=tokenizer.get_pattern() # Rust is using fancy_regex, which: **May** internally normalize behavior and **May** differ subtly in Unicode handling. The effective pattern is the one Rust accepted and stored.
         mergeable_ranks_list=tokenizer.get_mergeable_ranks()
 
         mergeable_ranks={bytes(k):v for k,v in mergeable_ranks_list}
@@ -46,10 +46,12 @@ class RustBPETokenizer:
 
         special_tokens={name:tokens_offset+i for i, name in enumerate(SPECIAL_TOKENS)}
 
-        enc=tiktoken.Encoding(
-            name="rustbpe",
+
+        # The following is a deterministic byte-level BPE executor
+        enc=tiktoken.Encoding(                               #This part constructs the final, frozen tokenizer used at inference time.
+            name="rustbpe",                                  #It is equivalent to loading a model’s weights into a runtime.
             pat_str=pattern,
-            mergeable_ranks=mergeable_ranks,
+            mergeable_ranks=mergeable_ranks, #This is the entire learned vocabulary.
             special_tokens=special_tokens
         )
 
