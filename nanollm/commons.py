@@ -49,7 +49,7 @@ def get_base_dir():
     if os.environ.get("NANOLLM_BASE_DIR"):
         nanollm_dir=os.environ.get('NANOLLM_BASE_DIR')
     else:
-        nanollm_dir=os.path.join(os.getcwd(), "nanollm")
+        nanollm_dir=os.path.join(os.getcwd())
 
         
 
