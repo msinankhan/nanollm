@@ -25,6 +25,7 @@ def text_iterator():
         for doc in batch:
             doc_text=doc
 
+
             if len(doc_text)>args.doc_cap:
                 doc_text=doc_text[:args.doc_cap]
 
@@ -40,7 +41,7 @@ text_iter=text_iterator()
 
 
 t0=time.time()
-tokenizer=RustBPETokenizer(text_iter,args.vocab_size)
+tokenizer=RustBPETokenizer.train_from_iterator(text_iter,args.vocab_size)
 t1=time.time()
 
 total_time=t1-t0
