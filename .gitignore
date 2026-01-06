@@ -2,6 +2,7 @@
 __pycache__/
 *.py[codz]
 *$py.class
+uv.lock
 
 # C extensions
 *.so
@@ -12,6 +13,7 @@ build/
 develop-eggs/
 dist/
 downloads/
+base_data/
 eggs/
 .eggs/
 lib/
