@@ -28,7 +28,7 @@ class ColoredFormatter(logging.Formatter):
 
         if levelname=='INFO':
             message=re.sub(r'(\d+\.?\d*\s*(?:GB|MB|%|docs))', rf'{self.BOLD}\1{self.RESET}',message)
-            message=re.sub(r'(Shard \d+)',rf'{self.COLORS["INFO"]}{self.BOLD}\1{self.REST}',message)
+            message=re.sub(r'(Shard \d+)',rf'{self.COLORS["INFO"]}{self.BOLD}\1{self.RESET}',message)
         return message
     
 def setup_default_logging():
@@ -49,9 +49,9 @@ def get_base_dir():
     if os.environ.get("NANOLLM_BASE_DIR"):
         nanollm_dir=os.environ.get('NANOLLM_BASE_DIR')
     else:
-        home_dir=os.path.expanduser("~")
-        cache_dir=os.path.join(home_dir, ".cache")
-        nanollm_dir=os.path.join(cache_dir,"nanollm")
+        nanollm_dir=os.path.join(os.getcwd(), "nanollm")
+
+        
 
     os.makedirs(nanollm_dir,exist_ok=True)
     return nanollm_dir
