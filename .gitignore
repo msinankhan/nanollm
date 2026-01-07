@@ -16,6 +16,8 @@ downloads/
 base_data/
 eggs/
 .eggs/
+report/
+tokenizer_dir/
 lib/
 tokenizer/
 lib64/
