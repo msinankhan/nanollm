@@ -261,23 +261,23 @@ class RustBPETokenizer:
         return ids
     
 
-    def get_tokenzier():
-        from nanollm.commons import get_base_dir
-        base_dir=get_base_dir()
-        tokenizer_directory=os.path.join(base_dir,"tokenizer_dir")
+def get_tokenzier():
+    from nanollm.commons import get_base_dir
+    base_dir=get_base_dir()
+    tokenizer_directory=os.path.join(base_dir,"tokenizer_dir")
 
-        return RustBPETokenizer.from_directory(tokenizer_directory)
+    return RustBPETokenizer.from_directory(tokenizer_directory)
     
-    def get_token_bytes(device="cpu"):
-        import torch
-        from nanollm.commons import get_base_dir
+def get_token_bytes(device="cpu"):
+    import torch
+    from nanollm.commons import get_base_dir
 
-        base_dir=get_base_dir()
-        tokenizer_dir=os.path.join(base_dir, "tokenizer")
-        token_bytes_path=os.path.join(tokenizer_dir, "token_bytes.pt")
+    base_dir=get_base_dir()
+    tokenizer_dir=os.path.join(base_dir, "tokenizer")
+    token_bytes_path=os.path.join(tokenizer_dir, "token_bytes.pt")
 
-        assert os.path.exists(token_bytes_path), f" Token bytes not found at {token_bytes_path}? It gets written by tok_train.py."
+    assert os.path.exists(token_bytes_path), f" Token bytes not found at {token_bytes_path}? It gets written by tok_train.py."
 
-        with open(token_bytes_path,'rb') as f:
-            token_bytes=torch.load(f,map_location=device) #GPU memory is precious; loading static metadata like token bytes on GPU is wasteful.
-        return token_bytes                                #Most of the time, you only need them for encoding/decoding, which is CPU-light.
+    with open(token_bytes_path,'rb') as f:
+        token_bytes=torch.load(f,map_location=device) #GPU memory is precious; loading static metadata like token bytes on GPU is wasteful.
+    return token_bytes                                #Most of the time, you only need them for encoding/decoding, which is CPU-light.
