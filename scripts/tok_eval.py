@@ -157,7 +157,7 @@ all_text=[
 ]
 
 if val_text:
-    all.append(("few-val",val_text))
+    all_text.append(("few-val",val_text))
 
 
 tokenizer_results={}
