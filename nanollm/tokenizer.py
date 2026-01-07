@@ -261,7 +261,7 @@ class RustBPETokenizer:
         return ids
     
 
-def get_tokenzier():
+def get_tokenizer():
     from nanollm.commons import get_base_dir
     base_dir=get_base_dir()
     tokenizer_directory=os.path.join(base_dir,"tokenizer_dir")
