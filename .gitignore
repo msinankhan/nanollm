@@ -17,6 +17,7 @@ base_data/
 eggs/
 .eggs/
 lib/
+tokenizer/
 lib64/
 parts/
 sdist/
