@@ -69,7 +69,7 @@ assert decode==test_text
 
 
 vocab_size=tokenizer.get_vocab_size()
-special_set=set(tokenizer.get_special_tokens)
+special_set=set(tokenizer.get_special_tokens())
 
 token_string=[tokenizer.decode([token_id]) for token_id in range(vocab_size)]
 
@@ -99,7 +99,7 @@ print(f"Saved token_bytes to {token_bytes_path}")
 
 from nanollm.report import get_report
 
-token_bytes_nonzero=(token_bytes[token_bytes>0]).to(dtype=torch.int32)
+token_bytes_nonzero=(token_bytes[token_bytes>0]).to(dtype=torch.float32)
 
 get_report().log(section="Tokenization training", data=[
      vars(args), # argparse command line arguments
