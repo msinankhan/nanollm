@@ -168,7 +168,7 @@ for tokenizer_name in ["gpt2",'gpt4','ours']:
     if tokenizer_name=='gpt2':
         tokenizer=RustBPETokenizer.from_pretraining("gpt2")
     elif tokenizer_name=="gpt4":
-        tokenizer=RustBPETokenizer.from_pretraining("gpt4")
+        tokenizer=RustBPETokenizer.from_pretraining("cl100k_base")
     else:
         tokenizer=get_tokenizer()
 
