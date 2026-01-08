@@ -35,6 +35,19 @@ def zeropower_via_newtonschulz5(G:Tensor, steps:int) -> Tensor:
 
 
         if G.size(-2)>G.size(-1):
-            X=X.mT
+            X=X.mT      #Undo earlier transpose.
 
         return X # It returns ≈U.V^T (not exact, but directionally correct.)
+    
+
+class Muon(torch.optim.Optimizer):
+
+    def __init__(self,params,lr=0.02, momentum=0.95, nesterov=True, ns_steps=5):
+        defaults=dict(lr=lr, momentum=momentum, nesterov=nesterov,ns_steps=ns_steps)
+
+        params:list[Tensor]=[*params]
+
+        param_groups=[]
+
+        for size in {p.numel() for p in params}:
+            group=dict(params=[p for p in params if p.numel()==size])
