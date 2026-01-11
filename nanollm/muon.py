@@ -19,10 +19,11 @@ def zeropower_via_newtonschulz5(G:Tensor, steps:int) -> Tensor:
 
 
         #NEW-SCHULZ Iteration:
-        """Here we are trying to approximate the ratatory vectors without performing SVD
+        """
+        Here we are trying to approximate the ratatory vectors without performing SVD
         X(X^T.X)^-1/2 approximates to U.V^T
         
-        But taking a square root is also computationally expensive, hence we rely on a 5th order Polynomial approximation technique to calculate it i.e computing    X←(aI+bA+cA2)X
+        But taking a square root is also computationally expensive, hence we rely on a 5th order Polynomial approximation technique to calculate it i.e computing X←(aI+bA+cA2)X
         
         Also, because we are approximating the square root, we will still have singular values, but they end up in a Uniform(0.5, 1.5), which is good enough for learing.
         
