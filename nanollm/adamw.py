@@ -21,7 +21,7 @@ class DistAdam(torch.optim.Optimizer):
         for group in self.param_groups:
             params:list[Tensor]= group["params"]
             for base_i in range(len(params)):
-                assert params[base_i].shape[0]%world_size==0, f"First dimension of parameter shape { params[base_i].shape} must be divisible by {world_size}"
+                assert params[base_i].shape[0]%world_size==0, f"First dimension of parameter shape {params[base_i].shape} must be divisible by {world_size}"
                 grad=params[base_i].grad
                 rank_size=grad.shape[0]//world_size
                 grad_slice=torch.empty_like(grad[:rank_size])
