@@ -46,3 +46,58 @@ def apply_rotary_emd(x,cos,sin):
     y2=x1*(-sin) +x2*cos            #so we get the rotations between pairs as (x1[0],x2[0]), (x1[1],x2[1]) and so on.
 
     return torch.cat([y1,y2],3)
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, config, layer_idx):
+        super().__init__()
+        self.layer_idx=layer_idx #KV Cache is shared across layers, each layer has its own KV cache. 
+        self.n_embed=config.n_embed
+        self.n_head=config.n_head
+        self.n_kv_head=config.n_kv_head
+        self.head_dim=self.n_embed//self.n_head
+
+        assert self.n_embed%self.n_head==0
+        assert self.n_kv_head<=self.n_head and self.n_head% self.n_kv_head==0 #We can have fewer K/V heads than Q heads, but every K/V head must have an equal num of Q heads
+
+        self.c_q=nn.Linear(self.n_embed, self.n_head*self.head_dim, bias=False)  #nn.Linear perform as Affine Transformation i.e y=x.W^T
+        self.c_k=nn.Linear(self.n_embed,self.n_kv_head*self.head_dim, bias=False) # these 4 lines intiatialize a weight matrix W^T of the (out_features, in_features).
+        self.c_v=nn.Linear(self.n_embed, self.n_kv_head*self.head_dim,bias=False) #When we want to project the matrices later, this matrix W^T is multiplied with the input.
+        self.c_proj=nn.Linear(self.n_embed,self.n_embed, bias=False) #The weight matrix is initialized as a He initialization, drawing values from a uniform distribution U(√-k, √k), k=1/in_features
+
+
+    def forward(self,x,cos_sin, window_size,kv_cache):
+        B,T,C=x.size() #C is n_embed, the width of the model
+
+        q=self.c_q(x).view(B, T, self.n_head, self.head_dim) #c_q(x) performs the linear projection of the matrix. using the weight matrix defined in c_q.
+        k=self.c_k(x).view(B,T,self.n_kv_head,self.head_dim) # .view() changes the shape of the tensor. from (B,T,128) to (B,T,8,16), 
+        v=self.c_v(x).view(B,T, self.n_kv_head,self.head_dim) # just adds newer rows, doesn't change the values. 
+
+        cos,sin=cos_sin
+
+        q,k=apply_rotary_emd(q,cos,sin), apply_rotary_emd(k,cos,sin) # Rotates the Q & K. 
+
+        q,k=norm(q),norm(k)
+
+        if kv_cache is None:
+            #Training
+            y=flash_attn.flash_attn_func(q,k,v,causal=True, window_size=window_size)
+
+        else:
+            #Inference
+            k_cache,v_cache=kv_cache.get_layer_cache(self.layer_idx)
+            y=flash_attn.flash_attn_with_kvcache(
+                q,k_cache,v_cache
+                k=k,v=v,
+                cache_seqlens=kv_cache.seqlens,
+                causal=True,
+                window_size=window_size)
+            
+            if self.layer_idx==kv_cache.n_layers-1:
+                kv_cache.advance(T) # Every layer edits the same slot in the kv_cache, once we are at the last layer, we gotta move the write pointer forward by Token T.
+                                    # This is to prevent over writing the same token.
+
+
+        y=y.contiguous().view(B,T,-1) # Reshape it back to the original tensor shape. flash Atten gives: (B, T, H, D), here we flatten it back to (B, T, n_embd), n_embed=H*D
+        y=self.c_proj(y) # Remixes the head back into the residual stream.
+
+        return y
