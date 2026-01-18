@@ -85,12 +85,12 @@ class CausalSelfAttention(nn.Module):
         else:
             #Inference
             k_cache,v_cache=kv_cache.get_layer_cache(self.layer_idx)
-            y=flash_attn.flash_attn_with_kvcache(
-                q,k_cache,v_cache
+            y=flash_attn.flash_attn_with_kvcache( 
+                q,k_cache,v_cache,
                 k=k,v=v,
                 cache_seqlens=kv_cache.seqlens,
                 causal=True,
-                window_size=window_size)
+                window_size=window_size  )
             
             if self.layer_idx==kv_cache.n_layers-1:
                 kv_cache.advance(T) # Every layer edits the same slot in the kv_cache, once we are at the last layer, we gotta move the write pointer forward by Token T.
@@ -101,3 +101,39 @@ class CausalSelfAttention(nn.Module):
         y=self.c_proj(y) # Remixes the head back into the residual stream.
 
         return y
+    
+
+class MLP(nn.Module):
+    def __init__(self, config ):
+        super().__init__()
+        self.c_fc=nn.Linear(config.n_embed,4*config.n_embed,bias=False) # Increase the dimensions so that the model has an increased representational capability.
+                                                                        # It provides sufficient capacity for the model to mix and transform features 
+        self.c_proj=nn.Linear(4*config.n_embed,config.n_embed,bias=False) # Bias is often unnecessary when we use normalization and also reduces optimization issues.
+        
+    def forward(self,x):
+        # (B, T, n_embd) → (B, T, 4 * n_embd)
+        x=self.c_fc(x) 
+
+        x=F.relu(x).square() #This creates a quadratic growth for positive values, making the activation smoother and more expressive than plain ReLU
+
+       
+        #This "down-projection" compresses the activated features back to the original dimension, 
+        # summarizing the computations for the residual stream. 
+        # It acts as a learned aggregation, **allowing the model to select which expanded features matter**.
+
+        x=self.c_proj(x)  # (B, T, 4 * n_embd) → (B, T, n_embd)
+        return x
+
+
+class Block(nn.Module):
+    def __init__(self, config,layer_idx):
+        super().__init__()
+        self.attn=CausalSelfAttention(config,layer_idx)
+        self.mlp=MLP(config)
+
+    def forward(self,x,cos_sin,window_size,kv_cache):
+        x=x+self.attn(norm(x),cos_sin,window_size,kv_cache)
+        x=x+self.mlp(norm(x))
+
+        return x
+    
