@@ -137,3 +137,45 @@ class Block(nn.Module):
 
         return x
     
+
+class GPT(nn.Module):
+    def __init__(self,config,pad_vocab_size_to=64):
+        super().__init__()
+        self.config=config
+        self.window_sizes=self._compute_window_sizes(config)
+
+        padded_vocab_size=((config.vocab_size + pad_vocab_size_to - 1 )//pad_vocab_size_to) * pad_vocab_size_to
+
+        if padded_vocab_size!=config.vocab_size:
+            print0(f"Padding vocab size from {config.vocab_size} to {padded_vocab_size} for efficiency")
+
+        self.transformer=nn.ModuleDict({
+            "wte":nn.Embedding(padded_vocab_size,config.n_embed),
+            "h":nn.ModuleList([Block(config,layer_idx) for layer_idx in range(config.n_layer)])
+        })
+
+
+        self.lm_head=nn.Linear(config.n_embed, padded_vocab_size,bias=False)
+
+
+        #The following are per-layer, learnable scalar gates that **control how information flows** through depth.
+        #At layer l, the update looks like: x(ℓ+1) ​ =λresid (ℓ)⋅ x (ℓ) ​ + λx0(ℓ)⋅x0 + Block(x ℓ)
+        #x0= Original Embeddings
+        #x(ℓ) = Current hidden state
+        #Block= attn + MLP
+        self.resid_lambda=nn.Parameter(torch.ones(config.n_layer)) # At initialization, we have x(ℓ+1​)=x(ℓ)​+f(x(ℓ​))
+        self.x0_lambdas=nn.Parameter(torch.zeros(config.n_layer)) # This is needed because, without x0, the information from the earlier layer drifts.      
+                                                                  # As in the classical transformer, we only add previous hidden layers i.e , x(ℓ+1)= x(ℓ) + f(x(ℓ))
+
+        self.rotate_seq_len= config.sequence_len*10
+
+        head_dim=config.n_embed//config.n_head
+
+        cos,sin=self._precompute_rotary_embeddings(self.rotate_seq_len, head_dim)
+
+
+
+        self.register_buffer("cos",cos,persistent=False)  
+        self.register_buffer("sin",sin, persistent=False)
+
+
