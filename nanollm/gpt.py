@@ -142,20 +142,21 @@ class GPT(nn.Module):
     def __init__(self,config,pad_vocab_size_to=64):
         super().__init__()
         self.config=config
-        self.window_sizes=self._compute_window_sizes(config)
+        self.window_sizes=self._compute_window_sizes(config) #Computes (left,right) number of tokens the attn can see. (-1,0) for full context.
 
-        padded_vocab_size=((config.vocab_size + pad_vocab_size_to - 1 )//pad_vocab_size_to) * pad_vocab_size_to
+        padded_vocab_size=((config.vocab_size + pad_vocab_size_to - 1 )//pad_vocab_size_to) * pad_vocab_size_to # rounds the vocab size to be a multiple of 64 for GPU efficiency.
 
         if padded_vocab_size!=config.vocab_size:
             print0(f"Padding vocab size from {config.vocab_size} to {padded_vocab_size} for efficiency")
 
-        self.transformer=nn.ModuleDict({
-            "wte":nn.Embedding(padded_vocab_size,config.n_embed),
-            "h":nn.ModuleList([Block(config,layer_idx) for layer_idx in range(config.n_layer)])
-        })
+        self.transformer=nn.ModuleDict({       #Module Dict is like a python Dictionary for ML models, we use it over python's dict as it tracks parameters. 
+            "wte":nn.Embedding(padded_vocab_size,config.n_embed), #Randomly initializes a matrix of shape (pd_vocab_size,n_embd) with a Normal dist.
+            "h":nn.ModuleList([Block(config,layer_idx) for layer_idx in range(config.n_layer)]) # Module List is like a python list
+        })                                                                                      # But it also tracks parameters.
 
 
-        self.lm_head=nn.Linear(config.n_embed, padded_vocab_size,bias=False)
+        self.lm_head=nn.Linear(config.n_embed, padded_vocab_size,bias=False) #This layer is to turn the hidden state into logits.
+                                                                            # So we get back the vocab_size vectors
 
 
         #The following are per-layer, learnable scalar gates that **control how information flows** through depth.
