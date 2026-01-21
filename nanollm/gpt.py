@@ -17,9 +17,9 @@ flash_attn=get_kernel('varunneal/flash-attention-3').flash_attn_interface
 
 @dataclass
 class GPTConfig:
-    sequence_len: int = 1024 #Maximum number of tokens the model can see at once, defines the **context window**
+    sequence_len: int = 2048 #Maximum number of tokens the model can see at once, defines the **context window**
 
-    vocab_size: int = 50304
+    vocab_size: int = 32768
 
     n_layer: int = 12 # Number of Transformer blocks (depth) [Each layer has an attention block and an MLP block]
 
@@ -29,7 +29,7 @@ class GPTConfig:
 
     n_embd : int = 768 # Size of the residual stream, Everything lives in this space: embeddings, attention outputs, MLP outputs. This is the single most important dimension in the entire model.
 
-    window_pattern : str = "L" # Controls sliding window attention per layer
+    window_pattern : str = "SSSL" # Controls sliding window attention per layer
 
 
 def norm(x):
@@ -164,19 +164,41 @@ class GPT(nn.Module):
         #x0= Original Embeddings
         #x(ℓ) = Current hidden state
         #Block= attn + MLP
+        # FAKE INIT: META DEVICE CONTEXT.
         self.resid_lambda=nn.Parameter(torch.ones(config.n_layer)) # At initialization, we have x(ℓ+1​)=x(ℓ)​+f(x(ℓ​))
         self.x0_lambdas=nn.Parameter(torch.zeros(config.n_layer)) # This is needed because, without x0, the information from the earlier layer drifts.      
                                                                   # As in the classical transformer, we only add previous hidden layers i.e , x(ℓ+1)= x(ℓ) + f(x(ℓ))
 
-        self.rotate_seq_len= config.sequence_len*10
+        self.rotate_seq_len= config.sequence_len*10  # We allocate the cache for the rotary embeddings, to store it before hand so that we don't have to compute it in forward.()
 
-        head_dim=config.n_embed//config.n_head
+        head_dim=config.n_embed//config.n_head #
 
         cos,sin=self._precompute_rotary_embeddings(self.rotate_seq_len, head_dim)
 
+        self.register_buffer("cos",cos,persistent=False)  # We store cos and sin in buffers because we don't want them to be trained upon as they are determined by the relative 
+        self.register_buffer("sin",sin, persistent=False) # position of the tokens. Hence the gradient is not calculated over it.
+
+    @torch.no_grad()
+    def init_weights(self):
+        torch.nn.init.normal_(self.transformer.wte.weight, mean=0.0, std=1.0) #As the embedding layer is simply a lookup table (not multiplicative) we can have a larger std to allow the model to explore more directions without risking exploding gradients.
+        torch.nn.init.normal_(self.lm_head,mean=0.0, std=0.001) # This layer is the last one, that converts the hidden layers to logits. The std is low, so as to have the 
+                                                                # init weights close to 0, so that we don't spike up the loss early in the training (because, most of the words' probability from the vocab will be 0 when it predicts the next token.)
 
 
-        self.register_buffer("cos",cos,persistent=False)  
-        self.register_buffer("sin",sin, persistent=False)
+        n_embed=self.config.n_embed
+        s=3**0.5*n_embed**-0.5 #We use sqrt(3) to ensure uniform achieves the same std as Normal. (because 99.8% of the data in a normal dist. lies in [-3,3] ).
+
+        for block in self.transformer.h:
+            torch.nn.init.uniform_(block.attn.c_q.weight, -s,s) # We initialize using uniform, to avoid large outliers
+            torch.nn.init.uniform_(block.attn.c_k.weight, -s,s)
+            torch.nn.init.uniform_(block.attn.c_v.weight,-s,s)
+            torch.nn.init.zeros_(block.attn.c_proj.weight) #We initialize it with zeros initially so that they behave as identity functions in the residual stream initially and gradually deepen the network
+            torch.nn.init.uniform_(block.mlp.c_fc.weight,-s,s) #c_fc=fully connected
+            torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
 
+
+        self.resid_lambda.fill_(1.0)    #Typical residual connection at init.
+        self.x0_lambdas.fill_(0.0)      # Skip Connection to input is disabled at init. 
+
+        
