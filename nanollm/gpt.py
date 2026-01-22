@@ -47,6 +47,9 @@ def apply_rotary_emd(x,cos,sin):
 
     return torch.cat([y1,y2],3)
 
+def has_ve(layer_idx,n_layer):
+    return layer_idx%2==(n_layer-1)%2
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, config, layer_idx):
         super().__init__()
@@ -64,13 +67,22 @@ class CausalSelfAttention(nn.Module):
         self.c_v=nn.Linear(self.n_embed, self.n_kv_head*self.head_dim,bias=False) #When we want to project the matrices later, this matrix W^T is multiplied with the input.
         self.c_proj=nn.Linear(self.n_embed,self.n_embed, bias=False) #The weight matrix is initialized as a He initialization, drawing values from a uniform distribution U(√-k, √k), k=1/in_features
 
+        self.ve_gate_channels=32 # Can increase to 64 for deeper models.
+        self.ve_gate=nn.Linear(self.ve_gate_channels, self.n_kv_head,bias=False) if has_ve(layer_idx,config.n_layer) else None
 
-    def forward(self,x,cos_sin, window_size,kv_cache):
+
+    def forward(self,x,ve, cos_sin, window_size,kv_cache):
         B,T,C=x.size() #C is n_embed, the width of the model
 
         q=self.c_q(x).view(B, T, self.n_head, self.head_dim) #c_q(x) performs the linear projection of the matrix. using the weight matrix defined in c_q.
         k=self.c_k(x).view(B,T,self.n_kv_head,self.head_dim) # .view() changes the shape of the tensor. from (B,T,128) to (B,T,8,16), 
         v=self.c_v(x).view(B,T, self.n_kv_head,self.head_dim) # just adds newer rows, doesn't change the values. 
+
+
+        if ve is not None:
+            ve=ve.view(B,T,self.n_kv_head,self.head_dim)
+            gate=2* torch.sigmoid(self.ve_gate(x[...,:self.ve_gate_channels])) # We only take the first 32 elements of the vector x as input to the linear layer in ve_gate. 
+            v=v+gate.unsqueeze(-1)*ve # .unsqueeze() Broadcasts (B,T,n_kv_head,head_dim) to (B,T,n_kv_head,1) so it scales the entire ve vector per head.
 
         cos,sin=cos_sin
 
@@ -131,8 +143,8 @@ class Block(nn.Module):
         self.attn=CausalSelfAttention(config,layer_idx)
         self.mlp=MLP(config)
 
-    def forward(self,x,cos_sin,window_size,kv_cache):
-        x=x+self.attn(norm(x),cos_sin,window_size,kv_cache)
+    def forward(self,x,ve,cos_sin,window_size,kv_cache):
+        x=x+self.attn(norm(x),ve, cos_sin,window_size,kv_cache)
         x=x+self.mlp(norm(x))
 
         return x
@@ -172,6 +184,8 @@ class GPT(nn.Module):
         self.rotate_seq_len= config.sequence_len*10  # We allocate the cache for the rotary embeddings, to store it before hand so that we don't have to compute it in forward.()
 
         head_dim=config.n_embed//config.n_head #
+        kv_dim=config.n_kv_head*head_dim
+        self.value_embeds=nn.ModuleDict({str(i):nn.Embedding(padded_vocab_size,kv_dim) for i in range(config.n_layer) if has_ve(i,config.n_layer)}) #Res-transformer style mixing of V, to have better signal propagation. This dictionary holds value embeddings from alternating layers.
 
         cos,sin=self._precompute_rotary_embeddings(self.rotate_seq_len, head_dim)
 
@@ -188,6 +202,7 @@ class GPT(nn.Module):
         n_embed=self.config.n_embed
         s=3**0.5*n_embed**-0.5 #We use sqrt(3) to ensure uniform achieves the same std as Normal. (because 99.8% of the data in a normal dist. lies in [-3,3] ).
 
+
         for block in self.transformer.h:
             torch.nn.init.uniform_(block.attn.c_q.weight, -s,s) # We initialize using uniform, to avoid large outliers
             torch.nn.init.uniform_(block.attn.c_k.weight, -s,s)
@@ -196,9 +211,17 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight,-s,s) #c_fc=fully connected
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
+        for ve in self.value_embeds.values():
+            torch.nn.init.uniform_(ve.weight,-s,s) # The initial weights are completely over written by the uniform dist. i.e the value in the tensor is randomly chosen between [-s,s].
+
+        for block in self.transformer.h:
+            if block.attn.ve_gate is not None:
+                torch.nn.init.zeros_(block.attn.ve_gate.weight)
 
 
         self.resid_lambda.fill_(1.0)    #Typical residual connection at init.
         self.x0_lambdas.fill_(0.0)      # Skip Connection to input is disabled at init. 
 
-        
+
+
+
