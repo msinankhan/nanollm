@@ -211,6 +211,9 @@ class GPT(nn.Module):
             torch.nn.init.uniform_(block.mlp.c_fc.weight,-s,s) #c_fc=fully connected
             torch.nn.init.zeros_(block.mlp.c_proj.weight)
 
+        self.resid_lambda.fill_(1.0)    #Typical residual connection at init.
+        self.x0_lambdas.fill_(0.0)      # Skip Connection to input is disabled at init. 
+
         for ve in self.value_embeds.values():
             torch.nn.init.uniform_(ve.weight,-s,s) # The initial weights are completely over written by the uniform dist. i.e the value in the tensor is randomly chosen between [-s,s].
 
@@ -218,9 +221,17 @@ class GPT(nn.Module):
             if block.attn.ve_gate is not None:
                 torch.nn.init.zeros_(block.attn.ve_gate.weight)
 
+        head_dim=self.config.n_embed//self.config.n_head
+        cos,sin=self._precompute_rotary_embeddings(self.rotate_seq_len,head_dim)
+        self.cos,self.sin=cos,sin
 
-        self.resid_lambda.fill_(1.0)    #Typical residual connection at init.
-        self.x0_lambdas.fill_(0.0)      # Skip Connection to input is disabled at init. 
+        if self.transformer.wte.weight.device.type =="cuda":
+            self.transformer.wte.to(dtype=torch.bfloat16)
+            for ve in self.value_embeds.values():
+                ve.to(dtype=torch.bfloat16)
+
+                
+        
 
 
 
