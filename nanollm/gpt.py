@@ -230,6 +230,51 @@ class GPT(nn.Module):
             for ve in self.value_embeds.values():
                 ve.to(dtype=torch.bfloat16)
 
+    def _precompute_rotary_embeddings(self,seq_len,head_dim, base=10000,device=None):
+        """We calculate the cos and sin for every position in the seq_len and store it in the cache to use it later.
+           Here, we are basically caluclating m.(θi) first and then use it to calculate cos and sin for every position."""
+
+        if device is None:
+            device= self.transformer.wte.weight.device
+
+        channel_range=torch.arange(0,head_dim,2,dtype=torch.float32,device=device) # This gives you an tensor like [0,2,4...head_dim-2]
+        inv_freq=1.0/(base**(channel_range/head_dim)) # This gives you θ i = b ^ (− 2 i / d) the 2i comes from channel_range, as when i=0,1,2, we have [0,2,4...]
+        t=torch.arange(seq_len,dtype=torch.float32,device=device) 
+
+        freqs=torch.outer(t,inv_freq)
+
+        cos,sin=freqs.cos(), freqs.sin()
+        cos,sin=cos.bfloat16,sin.bfloat16
+
+        cos,sin=cos[None,:,None,:], sin[None,:,None,:] #Final shape: (1, seq_len, 1, head_dim/2). This allows automatic broadcasting over batch sizes and attention heads. Which allows us to do q * cos without reshaping. 
+        return cos,sin
+    
+
+
+    def _compute_window_sizes(self,config):
+        pattern=config.window_pattern.upper()
+        assert all(c in "SL" for c in pattern), f"Invalid pattern {pattern} use S and L only."
+
+        long_window=config.seq_len
+        short_window=long_window//2
+
+        char_to_window={
+            "L" : (long_window,0),
+            "S" : (short_window,0)
+        }
+
+        window_size=[]
+
+        for layer_idx in range(config.n_layer):
+            char=pattern[layer_idx%len(pattern)]
+            window_size.append(char_to_window[char])
+
+        window_size[-1]=(long_window,0) # Final layer gets full context. 
+
+        return window_size
+
+
+
                 
         
 
