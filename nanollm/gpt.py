@@ -27,7 +27,7 @@ class GPTConfig:
 
     n_kv_head : int = 6 # Number of key/value heads
 
-    n_embd : int = 768 # Size of the residual stream, Everything lives in this space: embeddings, attention outputs, MLP outputs. This is the single most important dimension in the entire model.
+    n_embed : int = 768 # Size of the residual stream, Everything lives in this space: embeddings, attention outputs, MLP outputs. This is the single most important dimension in the entire model.
 
     window_pattern : str = "SSSL" # Controls sliding window attention per layer
 
@@ -252,6 +252,8 @@ class GPT(nn.Module):
 
 
     def _compute_window_sizes(self,config):
+        """PaLM style optimization.
+           returns (left,right), left=-1 for full context. """
         pattern=config.window_pattern.upper()
         assert all(c in "SL" for c in pattern), f"Invalid pattern {pattern} use S and L only."
 
@@ -273,11 +275,91 @@ class GPT(nn.Module):
 
         return window_size
 
+    def get_device(self):
+        return self.transformer.wte.weight.device
+    
+
+    def estimate_flops(self):
+        """This returns the number of Floating Point Operations, we only consider matmul operations and ignore scalar addition and multiplication."""
+
+        nparams=sum(p.numel() for p in self.parameters) #This gives you the whole set (including non-matmul operations which we gotta substract.)
+
+        value_embeds=sum (ve.weight.numel() for ve in self.value_embeds.values())
+
+        nparams_exclude=(self.transformer.wte.weight.numel() + value_embeds    # Get rid of embeddings as they are just look ups
+                         + self.resid_lambda.numel()+self.x0_lambdas.numel())  # Get rid of non-matmul ops as well.
 
 
-                
+        h,q,t=self.config.n_head, self.config.n_embed//self.config.n_head, self.config.sequence_len
+
+        attn_flops=0
+
+        for window_size in self.window_sizes: #Attn isn't captured in parameters because there is weight matrix involved.
+            window=window_size[0]             #As in, q=X.W_q (W_q is wt. matrix), where as in attn (q.k^T), we don't have a weight matrix and won't be captured in parameter count.
+            effective_seq=t if window<0 else min(window,t)
+            attn_flops+=12*h*q*effective_seq #Because there are 12 heads(1/layer).
+
+        num_flops_per_token=6*(nparams-nparams_exclude) + attn_flops # Each token contributes to about 6 Floating Point Operations, (2 forward prop. + 4 in backward prop.)
+        return num_flops_per_token
+    
+
+    def num_sclaing_params(self):
+        nparams=sum(p.numel() for p in self.parameters())
+        return nparams
+
+
+    def setup_optimizers(self,
+                         unembedding_lr=0.004, # This is for the logits, and it is extremely sensitive, hence a very low lr
+                         embedding_lr=0.2,     # The embedding space is huge, hence a larger lr.
+                         matrix_lr=0.02,       # Momentum Based.
+                         weight_decay=0.0,
+                         adam_betas=(0.8,0.95),
+                         scalar_lr=0.5):
         
 
+        model_dim=self.config.n_embed
+        ddp,rank,local_rank,world_size=get_dist_info()
 
 
+        matrix_params=list(self.transformer.h.parameters())
+        value_embed_params=list(self.value_embeds.parameters())
+        embedding_params=list(self.transformer.wte.parameters())
+        lm_head_params=list(self.lm_head.parameters())
+        resid_lambda_params=[self.resid_lambda]
+        x0_params=[self.x0_lambdas]
 
+        assert len(list(self.parameters())) == len(matrix_params) + len(value_embed_params) +len(embedding_params) +len(lm_head_params) + len(resid_lambda_params) + len(x0_params)
+
+
+        # Now we create AdamW Optimizer for embedding, lm_head and per-layer scalars.
+
+        dmodel_lr_scale=(model_dim/768) ** -0.5 # We scale the LR by  ∝ 1/√dmodel ( As the LR is tuned for 786 dim model through experiments and we have now use a scaled version of it to our model size)
+
+        print0(f"Scaling the LR for AdamW parameters by  ∝ 1/√{model_dim}/768 = {dmodel_lr_scale:6.f}")
+
+        adam_groups=[
+            dict(params=lm_head_params, lr=unembedding_lr*dmodel_lr_scale),
+            dict(params=embedding_params,lr=embedding_lr*dmodel_lr_scale),
+            dict(params=value_embed_params,lr=embedding_lr*dmodel_lr_scale),
+            dict(params=resid_lambda_params, lr=scalar_lr*0.01), # These are very sensitive as they accumulate in the residual stream.
+            dict(params=x0_params,lr=scalar_lr)
+        ]
+
+        adamw_kwargs=dict(betas=adam_betas, eps=1e-10,weight_decay=0.0) # Weight decay is only for the Muon Optimizer.
+        AdamFactory=DistAdam if ddp else partial(torch.optim.Adam,fused=True)
+        adamw_optimizer=AdamFactory(adam_groups,**adamw_kwargs)
+
+
+        muon_kwargs=dict(lr=matrix_lr, momentum=0.95, weight_decay=weight_decay)
+        MuonFactory=DistMuon if ddp else Muon
+        muon_optimizer=MuonFactory(matrix_params,**muon_kwargs)
+
+        optimizers=[adamw_optimizer,muon_optimizer]
+
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["initial_lr"]= group["lr"]
+
+        return optimizers
+
+        
