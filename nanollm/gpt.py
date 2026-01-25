@@ -361,3 +361,46 @@ class GPT(nn.Module):
                 group["initial_lr"]= group["lr"]
 
         return optimizers
+    
+    def forward(self,idx,targets=None,kv_cache=None,loss_reduction='mean'):
+        B,T=idx.size()
+
+        assert T<self.cos.size(1), f"Sequence Length grew beyond the rotary cache: {T}>{self.cos.size(1)}"
+        assert idx.device==self.cos.device, f"Rotary Embeddings and the idx are on different devices: {idx.device}!= {self.cos.device}"
+        assert self.cos.dtype==torch.bfloat16, f"Rotary embeddings must be in bfloat: {self.cos.dtype}"
+
+        # We now have to grab the rotary embeddings for the current sequence.
+        T0=0 if kv_cache is None else kv_cache.get_pos()
+        cos_sin=self.cos[:,T0:T0+T],self.sin[:,T0:T0+T] # The first ":" is ignored, it refers to the Batch dimension, as the shape of returned by _precompute_rotary_embeddings returns a shape (1,seq_len,1,head_dim/2) -> (B,T,H,Head_dim/2) 
+
+
+        x=self.transformer.wte(idx)
+        x=norm(x)
+        x0=x
+        for i,block in enumerate(self.transformer.h):
+            x=self.resid_lambda[i]*x +self.x0_lambdas[i]*x0
+            ve=self.value_embeds[str(i)] if str(i) in self.value_embeds else None
+            x=Block(x,ve,cos_sin,self.window_sizes[i], kv_cache)
+        
+        x=norm(x)
+
+
+        softcap=15
+        logits=self.lm_head(x)
+        logits=[...,self.config.vocab_size]
+        logits=logits.float()
+
+        logits=softcap* torch.tanh(logits/softcap)
+
+        if targets is not None:
+            # Cross entropy wants (N,C), N= num. of independent predictions, C= number of classes (vocab_size). But the input here is (B,T,V)
+            loss=F.cross_entropy(logits.view(-1,logits.size(-1)), # This turns (B,T,V) -> (B*T,V). Think of "-1" in view as x. Now we want to rearrange the data such that, x * V will be return all the elements which it had previously, hence we get (B*T,V)
+                                 targets.view(-1), # This flattens it, i.e (B,T) -> (B*T). 
+                                 ignore_index=-1, # We ignore the last index after the last token is predicted. 
+                                 reduction=loss_reduction 
+                                )
+            return loss
+        else:
+            return logits
+
+
