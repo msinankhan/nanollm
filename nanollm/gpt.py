@@ -241,13 +241,13 @@ class GPT(nn.Module):
         inv_freq=1.0/(base**(channel_range/head_dim)) # This gives you θ i = b ^ (− 2 i / d) the 2i comes from channel_range, as when i=0,1,2, we have [0,2,4...]
         t=torch.arange(seq_len,dtype=torch.float32,device=device) 
 
-        freqs=torch.outer(t,inv_freq)
+        freqs=torch.outer(t,inv_freq) #This is the angle m.θi for position m and dimension pair i.
 
-        cos,sin=freqs.cos(), freqs.sin()
+        cos,sin=freqs.cos(), freqs.sin() # The rows here refer to positions m and columns refer to θ i
         cos,sin=cos.bfloat16,sin.bfloat16
 
         cos,sin=cos[None,:,None,:], sin[None,:,None,:] #Final shape: (1, seq_len, 1, head_dim/2). This allows automatic broadcasting over batch sizes and attention heads. Which allows us to do q * cos without reshaping. 
-        return cos,sin
+        return cos,sin #The function returns these tensors, which are registered as buffers in the model.
     
 
 
@@ -361,5 +361,3 @@ class GPT(nn.Module):
                 group["initial_lr"]= group["lr"]
 
         return optimizers
-
-        
