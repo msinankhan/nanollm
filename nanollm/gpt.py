@@ -404,3 +404,38 @@ class GPT(nn.Module):
             return logits
 
 
+
+
+    @torch.inference_mode() #disables auto grad
+    def generate(self,tokens,max_tokens,temperature=1.0,top_k=None, seed=42):
+        assert isinstance(tokens,list) 
+
+        device=self.get_device()
+        if temperature>0:
+            rng=torch.Generator(device=device)
+            rng.manual_seed(seed)
+        ids=torch.tensor([tokens],dtype=torch.long, device=device) #torch.long=64bit signed integer equivalent to torch.int64
+
+        for _ in range(max_tokens):
+            logits=self.forward(ids) # It recieves (B,T,Vocab_size) meaning, for every position in the sequence the model predicts the next token after that position (even for the tokens who's next positions we have defined).
+
+            logits=logits[:,-1,:] # We only need the prediction of after the last token. (B,Vocab_size)
+
+            if top_k is not None:
+                v,_=torch.topk(logits, min(top_k,logits.size(-1)))
+                logits[logits[:,v[-1]]]=-float('inf') # We are setting the logits of all the tokens beyong the kth largest logit to -inf to make sure they will not be sampled at all.
+
+            if temperature>0:
+                logits=logits/temperature #Dividing by temperature scales entropy.
+                probs=F.softmax(logits, dim=-1) # dim =-1 because (B,V), we have to choose from Vocab only. 
+                next_id=torch.multimodal(probs,dim=-1,num_samples=1,generator=rng) #torch.multimodal chooses a number from the uniform probability distribution. The generator helps in choosing the number.
+            else:
+                next_id=torch.argmax(logits,dim=-1,keepdim=True) 
+
+            ids=torch.cat((ids,next_id),dim=1) 
+            token=ids.item()
+            yield token
+
+
+            
+
