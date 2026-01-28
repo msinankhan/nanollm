@@ -385,10 +385,10 @@ class GPT(nn.Module):
         x=norm(x)
 
 
-        softcap=15
-        logits=self.lm_head(x)
-        logits=[...,self.config.vocab_size]
-        logits=logits.float()
+        softcap=15 # Softmax cares about logit gaps, If the best logit is larger than the second-best by Δ: if Δ=5, exp(Δ)=148, confidence: 99.3%; similarly, if Δ=15, confidence= 99.9999997%
+        logits=self.lm_head(x) 
+        logits=[...,self.config.vocab_size] # We are getting rid of the padding.
+        logits=logits.float() 
 
         logits=softcap* torch.tanh(logits/softcap)
 
