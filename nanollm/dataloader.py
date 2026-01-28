@@ -56,3 +56,45 @@ def _document_batches(split,resume_state_dict, tokenizer_batch_size):
         first_pass=False
         epoch+=1
         
+def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokenizer_threads=4, tokenizer_batch_size=128, device="cuda", resume_state_dict=None):
+
+    assert split in ['train','val'], f"Split should be either train or val :{split}"
+
+    batches=_document_batches (split,resume_state_dict,tokenizer_batch_size)
+    needed_tokens=B*T+1
+    bos_token=tokenizer.get_bos_token_id()
+    token_buffer=[]
+    pg_idx,rg_idx, epoch=0,0,1
+
+    while True:
+
+        while len(token_buffer)< needed_tokens:
+            doc_batch,(pg_idx,rg_idx,epoch) = next(batches)
+            tokens_list=tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads )
+
+            for tokens in tokens_list:
+                token_buffer.extend(tokens) #When we flatten the buffer, the document boundaries are lost and tokens become one continuous stream.
+                                            #BOS is no longer guaranteed at sequence start
+                                            #Attention can span across unrelated documents.
+
+        tokens=token_buffer[:needed_tokens] # We grab just enough tokens for inputs, targets. 
+        token_buffer=token_buffer[B*T:]     # We overlap by 1 token, this extra token belongs to the target
+
+        use_cuda=device=="cuda"
+
+        scratch=torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda)
+        inputs=scratch[:-1].view(B,T).to(device=device, non_blocking=use_cuda)
+        targets=scratch[1:].view(B,T).to(device=device,non_blocking=use_cuda)
+
+        yield inputs,targets, {"pg_idx":pg_idx, "rg_idx":rg_idx, "epoch":epoch}
+
+
+def tokenizing_distributed_data_loader(*args,**kwargs):
+    """A Helper function to return inputs and targets without the state dictionary."""
+    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state(*args,**kwargs):
+        yield inputs, targets
+
+
+
+
+        
