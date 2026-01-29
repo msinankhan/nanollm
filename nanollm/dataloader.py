@@ -139,7 +139,8 @@ def tokenizing_distributed_data_loader_with_state_bos_benefit(
                     row.extend(doc_buffer.pop(best_idx))
 
                 else:
-                    """This address the case where every document is bigger than the remaining capacity, for which we choose the shortest document to add into the list and crop the rest that doesn't fit in the row_capacity. """
+                    """This address the case where every document is bigger than the remaining capacity, for which we choose the shortest document to add into the list and crop the rest that doesn't fit in the row_capacity.
+                     It also prevents token loss, when we choose a smaller document, as if we must dicard documents we will discard as few tokens as possible. """
                     shortest_idx=min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i])) # We find the shortest document to crop, so that it may be as full as possible in the row. 
                     doc=doc_buffer.pop(shortest_idx)
                     row.extend(doc[:remaining])
