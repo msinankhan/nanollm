@@ -95,6 +95,66 @@ def tokenizing_distributed_data_loader(*args,**kwargs):
         yield inputs, targets
 
 
+def tokenizing_distributed_data_loader_with_state_bos_benefit(
+        tokenizer, B,T, split,
+        tokenizer_threads=4, tokenizer_batch_size=128,
+        device="cuda", resume_state_dict=None,
+        buffer_size=1000
+):
+    assert split in ['train', "val"], f"Split should be either train or val: {split}"
+
+    row_capacity=T+1
+    doc_buffer=[]
+    batches=_document_batches(split,resume_state_dict, tokenizer_batch_size)
+    bos_token=tokenizer.get_bos_token_id()
+    pg_idx,rg_idx,epoch=0,0,1
+
+    def refill_buffer():
+        nonlocal pg_idx,rg_idx,epoch
+        doc_batch, (pg_idx,rg_idx,epoch)= next(batches)
+        token_lists=tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
+        for tokens in token_lists:
+            doc_buffer.append(tokens)
+
+    while True:
+        rows=[]
+        for _ in range(B):
+            row=[]
+            while len(row) < row_capacity:
+                while(doc_buffer)< buffer_size:
+                    refill_buffer() # We fill the doc_buffer with 999 document's tokens
+
+                remaining=row_capacity-len(row)
 
 
-        
+                best_idx=-1
+                best_len=0
+
+                for i, doc in enumerate(doc_buffer): # Here, we are trying to figure out which is the longest full document that can fit in the row[], without us having to trim it.
+                    if len(doc)<=remaining and len(doc)>best_len:
+                        best_idx=i
+                        best_len=len(doc)
+
+                if best_idx>=0:                     #If we find such an index where the len of the doc is lesser than the the row capacity, we append it to the row[].
+                    row.extend(doc_buffer.pop(best_idx))
+
+                else:
+                    """This address the case where every document is bigger than the remaining capacity, for which we choose the shortest document to add into the list and crop the rest that doesn't fit in the row_capacity. """
+                    shortest_idx=min(range(len(doc_buffer)), key=lambda i: len(doc_buffer[i])) # We find the shortest document to crop, so that it may be as full as possible in the row. 
+                    doc=doc_buffer.pop(shortest_idx)
+                    row.extend(doc[:remaining])
+
+            rows.append(row[:row_capacity])
+
+        use_cuda=device=="cuda"
+
+        batch_tensor=torch.tensor(rows,dtype=torch.long, pin_memory=use_cuda)
+        inputs=batch_tensor[:,:-1].to(device=device, non_blocing=use_cuda)
+        targets=batch_tensor[:,1:].to(device=device, non_blocking=use_cuda)
+
+        yield inputs, targets, {"pg_idx":pg_idx, "rg_idx":rg_idx, "epoch":epoch}
+
+
+def tokenizing_distributed_data_loader_bos_bestfit(*args,**kwargs):
+    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_benefit(*args,**kwargs):
+        return inputs, targets
