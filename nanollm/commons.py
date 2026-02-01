@@ -131,7 +131,7 @@ def get_dist_info():
         return False,0,0,1
     
 
-def detect_device_type():
+def autodetect_device_type():
     if torch.cuda.is_available():
         device_type='cuda'
     else:
