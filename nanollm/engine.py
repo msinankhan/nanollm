@@ -131,3 +131,29 @@ def sample_next_token(logits,rng,temperature=1.0,top_k=None):
     
 
 
+class RowState: 
+    """
+    Each row: Independent generation trajectory.
+    With each prompt, we want n_sample generations.
+    Each Sample is its own evolving sequence.
+     
+    Each row helps tell the engine:
+     (i)   Are we inside a python tool block?
+     (ii)  Do we need to force inject tokens?
+     (iii) Is this sample already finished?
+     (iv)  What tokens belong to tool expression?
+      
+     """
+    def __init__(self,current_tokens):
+        self.current_tokens=current_tokens or [] #Stores the entire token sequence so far.
+        self.forced_tokens=deque() # Used during tool call, when the engine must override sampling and outputs must be injected verbatim.
+        self.in_python_block=False # Helps to identify tokens that belong to a python exp. It is turned to True when the appropriate tag is detected.
+        self.python_expr_token=[] # Raw token IDs inside a python block which will be used to decode and run the code exp.
+        self.completed=False # Helps to identify if a given row is completed.
+
+
+class Engine:
+    def __init__(self,model,tokenizer):
+        self.model=model
+        self.tokenizer=tokenizer # This is needed for tool use. 
+         
