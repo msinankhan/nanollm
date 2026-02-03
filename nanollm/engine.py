@@ -157,3 +157,54 @@ class Engine:
         self.model=model
         self.tokenizer=tokenizer # This is needed for tool use. 
          
+
+    @torch.inference_mode
+    def generate(self, tokens,num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
+        assert isinstance(tokens,list) and isinstance(tokens[0],int), "Expecting a list of int."
+        device=self.model.get_device()
+
+        dtype=torch.bfloat16 if device=="cuda" else torch.float32
+        rng=torch.Generator(device=device)
+        rng.manual_seed(seed)
+
+
+        get_special= lambda s: self.tokenizer.encode_special(s)
+        python_start=get_special("<|python_start|>")
+        python_end=get_special("<|python_end|>")
+        output_start=get_special("<|output_start|>")
+        output_end=get_special("<|output_end|>")
+        assistant_end=get_special("<|assistant_end|>")
+        bos=self.tokenizer.get_bos_token()
+
+
+        #We first run the prompt to get the K & V from it and then we try to expand it by the number of rows as it is identical across the rows.
+        m=self.model.config
+        kv_model_kwargs={"num_heads":m.n_kv_head,"head_dim":m.n_embed//m.n_head, "num_layers":m.n_layer}
+        kv_cache_prefill=KVCache(
+            batch_size=1, # First, generate only one sample for the next token
+            seq_len=len(tokens), 
+            device= device, dtype = dtype
+            **kv_model_kwargs
+        )
+        ids = torch.tensor([tokens], dtype=torch.long, device=device)
+        logits=self.model.forward(ids,kv_cache_prefill)
+
+        logits=logits[:,-1,:].expand(num_samples,-1) # The shape of logits is (B,T,V) in this case (1,T,V). We only need the last token preds, hence (:,-1,:) and we expand it to num_samples 
+                                                     # Expand simply broadcasts the same tensor along the.    
+
+        kv_length_hint=(len(tokens)+max_tokens) if max_tokens is not None else m.sequence_len
+        kv_cache_decode=KVCache(
+            batch_size=num_samples,
+            seq_len=kv_length_hint,
+            device=device,
+            dtype=dtype,
+            **kv_model_kwargs
+        )
+
+        kv_cache_decode.prefill(kv_cache_prefill) # This copies the KV cache
+        del kv_cache_prefill
+
+        rowstates=[RowState(tokens.copy()) for _ in range(num_samples)]
+
+
+        
