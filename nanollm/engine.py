@@ -204,7 +204,143 @@ class Engine:
         kv_cache_decode.prefill(kv_cache_prefill) # This copies the KV cache
         del kv_cache_prefill
 
-        rowstates=[RowState(tokens.copy()) for _ in range(num_samples)]
+        row_states=[RowState(tokens.copy()) for _ in range(num_samples)]
+
+        num_generated=0
+        while True:
+            if max_tokens is not None and num_generated>=max_tokens:
+                break
+
+            if all(state.completed for state in row_states):
+                break
+
+            next_ids=sample_next_token(logits,rng,temperature,top_k)
+            sampled_tokens=next_ids[:,0].tolist()
+
+
+            token_column=[] #Contains next token id along each row.
+            token_masks=[] #Contains a mask to tell wether it was a generated token(1) or a forced token(0)
+
+            for i,state in enumerate(row_states):
+                is_forced=len(state.forced_tokens)>0
+                token_masks.append(0 if is_forced else 1)
+                next_token=state.forced_tokens.popleft() if is_forced else sampled_tokens[i]
+                token_column.append(next_token)
+
+                state.current_tokens.append(next_token) #Update the row with the new token.
+
+                if next_token==bos or next_token==assistant_end:
+                    state.completed=True
+
+
+                if next_token == python_start:
+                    state.in_python_block=True
+                    state.python_expr_token=[]
+                elif next_token==python_end and state.in_python_block:
+                    state.in_python_block=False
+                    if state.python_expr_token:
+                        expr=self.tokenizer.decode(state.python_expr_token)
+                        result=use_calculator(expr)
+
+                        if result is not None:
+                            result_tokens=self.tokenizer.encode(result)
+                            state.forced_tokens.append(output_start)
+                            state.forced_tokens.append(result_tokens)
+                            state.forced_tokens.append(output_end)
+
+                    state.python_expr_token=[]
+
+                elif state.in_python_block:
+                    state.python_expr_token.append(next_token)
+
+
+            yield token_column, token_masks
+            num_generated+=1
+
+            #Prepare logits for next iteration. 
+            ids=torch.tensor(token_column,dtype=torch.long, device=device).unsqueeze(1)
+            logits=self.model.forward(ids, kv_cache=kv_cache_decode)[:,-1,:]   #(B, Vocab_size)
+
+
+    def generte_batch(self,tokens,num_samples=1,**kwargs):
+        assistant_end=self.tokenizer.encode_special("<|assistant_end|>")
+        bos=self.tokenizer.get_bos_token()
+        results=[tokens.copy() for _ in range(num_samples)]
+        masks=[[0]*len(tokens) for _ in range(num_samples)] #Copy the same prompt across all rows (num_samples).
+
+
+        completed=[False] *num_samples
+
+        for token_column, token_masks in self.generate(tokens,num_samples,**kwargs):
+            for i , (token,mask) in enumerate(zip(token_column,token_masks)):
+                if not completed[i]:
+                    if token==bos or token == assistant_end:
+                        completed[i] = True
+                    else:
+                        results[i].append(token)
+                        mask[i].append(mask)
+            
+            if all(completed):
+                break
+
+        return results, masks
+    
+
+    if __name__=="__main__":
+
+        import time
+        device_type=autodetect_device_type()
+        ddp,ddp_rank,ddp_local_rank,ddp_world_size,device=compute_init(device_type)
+        autocast_ctx=torch.amp.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=="cuda" else nullcontext()
+
+        model,tokenizer,meta=load_model("base",device,phase="eval")
+        bos_token_id=tokenizer.bos_token_id()
+        
+        kwargs=dict(max_tokens=42,temperature=0.0)
+
+        prompt_tokens=tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
+
+        generate_tokens=[]
+        torch.cuda.synchronize()
+        t0=time.time()
+        stream=model.generate(prompt_tokens,**kwargs)
+
+        with autocast_ctx:
+            for token in stream:
+                generate_tokens.append(token)
+                chunk=tokenizer.decode([token])
+                print(chunk,end="",flush=True)
+
+        print()
+        torch.cuda.synchronize()
+        t1=time.time()
+
+        print(f"Reference time: {t1-t0:.2f}s")
+        reference_ids=generate_tokens
+
+        generated_tokens=[]
+        engine= Engine(model,tokenizer)
+
+        stream=engine.generate(prompt_tokens,num_samples=1,**kwargs)
+        torch.cuda.synchronize()
+        t0=time.time()
+
+        with autocast_ctx:
+            for token_column,token_masks in stream:
+                token=token_column[0]
+                generated_tokens.append(token)
+                chunk=tokenizer.decode([token])
+                print(chunk,end="", flush=True)
+
+
+        print()
+
+        torch.cuda.synchronize()
+        t1=time.time()
+        print(f"Engine time: {t1-t0:.2f}s")
+
+
+
 
 
         
