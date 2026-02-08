@@ -72,3 +72,20 @@ def render_prompt_lm(item,continuation_delimiter,fewshot_examples=None):
 
     prompt_without=prompt_without.strip()
     return [prompt_without, prompt_with]
+
+
+def find_common_length(token_sequence,direction='left'):
+    """Length of the common prefix or suffix across token sequences."""
+    
+    min_len=min(len(seq) for seq in token_sequence)
+    indices={
+        'left':range(min_len),
+        'right':range(-1,-min_len-1,-1)
+    }[direction]
+
+    for i, idx in enumerate(indices):
+        token=token_sequence[0][idx]
+        if not all(seq[idx]==token for seq in token_sequence):
+            return idx
+
+    return min_len
