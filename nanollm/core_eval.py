@@ -89,3 +89,11 @@ def find_common_length(token_sequence,direction='left'):
             return idx
 
     return min_len
+
+def stack_sequences(tokens,pad_token_id):
+    bsz,seq_len=len(tokens),max(len(x) for x in tokens)
+    input_ids=torch.full((bsz,seq_len),pad_token_id,dtype=torch.long)
+    for i,x in enumerate(tokens):
+        input_ids[i,:len(x)] =torch.tensor(x,dtype=torch.long)
+
+    return input_ids
