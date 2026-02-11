@@ -261,3 +261,21 @@ def evaluate_example(idx,model,tokenizer,data,device,task_meta):
     else:
         raise ValueError(f"Unsupported task type: {task_type}")
     return is_correct
+
+
+def evaluate_task( model,tokenizer,data,device,task_meta):
+    rank=dist.get_rank() if dist.is_initialized() else 0
+    world_size=dist.get_world_size() if dist.is_initialized else 1
+    correct =torch.zeros(len(data), dtype=torch.float32, device=device)
+
+    for idx in range(rank,len(data), world_size):
+        is_correct = evaluate_example(idx,model,tokenizer, data,device,task_meta)
+        correct[idx] =is_correct
+
+    if world_size>1:
+        dist.barrier()
+        dist.all_reduce(correct, op=dist.ReduceOP.SUM) #gradient synchronization in DDP
+
+    mean_correct=correct.mean().item()
+
+    return mean_correct
