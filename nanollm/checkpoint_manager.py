@@ -55,7 +55,7 @@ def save_checkpoint(checkpoint_dir,step,model_data, optimizer_data, meta_data,ra
         logger.info(f"Saved optimizer state to {optimizer_path}.")
 
 
-def load_checkpoints(checkpoint_dir,step,device, load_optimizer=False, rank=0):
+def load_checkpoint(checkpoint_dir,step,device, load_optimizer=False, rank=0):
     model_path=os.path.join(checkpoint_dir, f"model_{step:06d}.pt")
     model_data=torch.load(model_path, map_location=device)
 
@@ -74,7 +74,7 @@ def load_checkpoints(checkpoint_dir,step,device, load_optimizer=False, rank=0):
 def build_model(checkpoint_dir,step, device,phase):
     assert phase in ["train","eval"], f"The phase must be either train or eval:{phase}."
 
-    model_data,optimizer_data,meta_data=load_checkpoints(checkpoint_dir,step,device, load_optimizer=False)
+    model_data,optimizer_data,meta_data=load_checkpoint(checkpoint_dir,step,device, load_optimizer=False)
 
     if device.type in {"cpu"}:
         model_data={k:v.float() if v.dtype==torch.bfloat16 else v 

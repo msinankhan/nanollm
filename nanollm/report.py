@@ -87,7 +87,7 @@ def generate_header():
     gpu_info = get_gpu_info()
     sys_info = get_system_info()
 
-    header = f"""# nanochat training report
+    header = f"""# nanollm training report
 
 Generated: {timestamp}
 
@@ -247,7 +247,7 @@ class Report:
             else:
                 start_time = None # will cause us to not write the total wall clock time
                 bloat_data = "[bloat data missing]"
-                print(f"Warning: {header_file} does not exist. Did you forget to run `nanochat reset`?")
+                print(f"Warning: {header_file} does not exist. Did you forget to run `nanollm reset`?")
             # process all the individual sections
             for file_name in EXPECTED_FILES:
                 section_file = os.path.join(report_dir, file_name)
@@ -360,7 +360,7 @@ def get_report():
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Generate or reset nanochat training reports.")
+    parser = argparse.ArgumentParser(description="Generate or reset nanollm training reports.")
     parser.add_argument("command", nargs="?", default="generate", choices=["generate", "reset"], help="Operation to perform (default: generate)")
     args = parser.parse_args()
     if args.command == "generate":

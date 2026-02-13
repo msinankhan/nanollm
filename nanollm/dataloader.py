@@ -95,7 +95,7 @@ def tokenizing_distributed_data_loader(*args,**kwargs):
         yield inputs, targets
 
 
-def tokenizing_distributed_data_loader_with_state_bos_benefit(
+def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         tokenizer, B,T, split,
         tokenizer_threads=4, tokenizer_batch_size=128,
         device="cuda", resume_state_dict=None,
@@ -157,5 +157,5 @@ def tokenizing_distributed_data_loader_with_state_bos_benefit(
 
 
 def tokenizing_distributed_data_loader_bos_bestfit(*args,**kwargs):
-    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_benefit(*args,**kwargs):
+    for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args,**kwargs):
         return inputs, targets
