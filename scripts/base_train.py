@@ -140,6 +140,48 @@ token_bytes=get_token_bytes(device=device)
 vocab_size=tokenizer.get_vocab_size()
 print0(f"Vocab Size: {vocab_size:,}")
 
+def build_model_meta(depth):
+
+    base_dim=depth* args.aspect_ratio
+    model_dim=((base_dim+args.head_dim-1)//args.head_dim) * args.head_dim # This is the size of the vector that represents each token inside the transformer.
+                                                                          # This is the width of the model.
+                                                                          #You can think of it as:
+                                                                            # The dimensionality of the representation space
+                                                                            # The bandwidth of information per token
+                                                                            # The size of the "feature vector" for each token
+
+
+    num_heads=model_dim//args.head_dim         # Inside multi-head attention, we split the representation into multiple heads. 
+                                               # IF model_dim = 768 ; num_heads = 12.
+                                               # Then: each head works on a (768/12=64) 64-dimensional subspace.
 
 
 
+    config= GPTConfig(
+        sequence=args.seq_len, vocab_size=vocab_size,
+        n_layer=depth, n_head=num_heads, n_kv_head=num_heads,
+        n_embd=model_dim, window_pattern=args.window_pattern
+    )
+    with torch.device("meta"):
+        model_meta=GPT(config)
+    return model_meta
+
+
+model =build_model_meta(args.depth) # 1) Build the model on meta data.
+model_config=model.config
+model_config_kwargs=asdict(model_config)
+print0(f"Model Config: \n{json.dumps(model_config_kwargs, indent=2)}")
+model.to_empty(device=device) #2) All tensors get storage on target device but with uninitialized (garbage) data
+model.init_weights() # 3) All tensors get initialized
+
+
+base_dir=get_base_dir()
+output_dirname=args.model_tag if args.model_tag else f"d{args.depth}"
+checkpoint_dir= os.path.join(base_dir, "base_checkpoints", output_dirname)
+resuming = args.resume_from_step != -1
+
+if resuming:
+    print0(f"Resuming optimization from step: {args.resume_from_step}")
+    model_data, optimizer_data, meta_data= load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
+    model.load_state_dict(model_data, strict=True, assign=True)
+    del model_data
