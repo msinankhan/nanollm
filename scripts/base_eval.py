@@ -266,7 +266,7 @@ def main():
 
 
     if unconditional_samples:
-        report_data.append({f"Unconditiioned {i}": s for i,s enumerate(unconditional_samples)})
+        report_data.append({f"Unconditiioned {i}": s for i,s in enumerate(unconditional_samples)})
 
     get_report().log(section = "Base model evaluation", data= report_data)
 

@@ -185,3 +185,26 @@ if resuming:
     model_data, optimizer_data, meta_data= load_checkpoint(checkpoint_dir, args.resume_from_step, device, load_optimizer=True, rank=ddp_rank)
     model.load_state_dict(model_data, strict=True, assign=True)
     del model_data
+
+
+if args.fp8:
+    if device != "cuda":
+        print0(f"fp8 requires CUDA, ignoring --fp8 flag.")
+    else:
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+        import torch.nn as nn
+
+        def fp8_module_filter(mod:nn.Module, fqn:str) -> bool:
+            if not isinstance(mod, nn.Linear):
+                return False
+            if mod.in_features%16 or mod.out_features %16 !=0:
+                return False
+            return True
+        
+        fp8_config=Float8LinearConfig.from_recipe_name(args.fp8_recipe)
+        convert_to_float8_training(model,config=fp8_config, module_filter_fn=fp8_module_filter)
+        num_fp8_layers=sum(1 for m in model.modules() if 'Float8' in type(m).__name__)
+        num_skipped=sum(1 for m in model.modules() if isinstance(m,nn.Linear)) - num_fp8_layers
+        print0(f" FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8_layers} layers, skipped {num_skipped} (dims not divisible by 16)")
+
+
