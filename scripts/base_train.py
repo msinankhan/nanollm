@@ -208,3 +208,53 @@ if args.fp8:
         print0(f" FP8 training enabled ({args.fp8_recipe} scaling) - converted {num_fp8_layers} layers, skipped {num_skipped} (dims not divisible by 16)")
 
 
+        
+
+with disable_fp8(model):
+    import torch.nn as nn
+    fp8_locations=[]   # list of (parent_module, attr_name, fp8_module)
+    for model, module in model.named_modules():
+        if 'Float8' in type(module).__name__:
+            if '.' in name:
+                parent_name,attr_name=name.rsplit('.',1)
+
+                parent=module.get_submodule(parent_name)
+
+            else:
+                parent=model #If module name is: transformer.blocks.3.attn.proj
+                             #Then: parent_name = transformer.blocks.3.attn, attr_name = proj
+                attr_name=name
+
+            fp8_locations.append((parent,attr_name,module))
+
+
+    if not fp8_locations:
+        yield
+        return
+
+
+    for parent, attr_name,module in fp8_locations:
+        linear=nn.Linear(
+            fp8_module.in_features,
+            fp8_module.out_features,
+            bias=fp8_module.bias is not None,
+            device= fp8_module.weight.device,
+            dtype=fp8_module.weight.dtype
+        )
+
+        linear.weight=fp8_module.weight
+
+        if fp8_module.bias is not None:
+            linear.bias=fp8_module.bias
+
+        setattr(parent, attr_name, linear)
+
+
+    try:
+        yield
+
+    finally:
+        for parent,attr_name,fp8_module in fp8_locations:
+            setattr(parent, attr_name, fp8_module)
+
+
