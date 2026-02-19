@@ -234,15 +234,15 @@ with disable_fp8(model):
 
 
     for parent, attr_name,module in fp8_locations:
-        linear=nn.Linear(
-            fp8_module.in_features,
-            fp8_module.out_features,
-            bias=fp8_module.bias is not None,
+        linear=nn.Linear(                                   # Regular linear layer with same:
+            fp8_module.in_features,                         # input dim
+            fp8_module.out_features,                        # output dim
+            bias=fp8_module.bias is not None,               
             device= fp8_module.weight.device,
-            dtype=fp8_module.weight.dtype
+            dtype=fp8_module.weight.dtype     #dtype remains bf16. Because The stored master weights remain in BF16 (or FP16).
         )
 
-        linear.weight=fp8_module.weight
+        linear.weight=fp8_module.weight      # They are NOT copying weights. They are sharing the same tensor. 
 
         if fp8_module.bias is not None:
             linear.bias=fp8_module.bias
@@ -258,3 +258,17 @@ with disable_fp8(model):
             setattr(parent, attr_name, fp8_module)
 
 
+
+orig_model=model
+model=model.compile(model,config=False)     #torch.compile() (introduced in PyTorch 2.0) wraps your model in a compiled graph module.
+                                            #  After model = torch.compile(model)
+                                            # model is no longer your raw nn.Module
+
+                                            #That wrapper:
+
+                                                # Traces the model
+                                                # Freezes parts of the structure
+                                                # Guards assumptions
+                                                # Caches kernels
+
+                                
