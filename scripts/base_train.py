@@ -259,10 +259,11 @@ with disable_fp8(model):
 
 
 
-orig_model=model
-model=model.compile(model,config=False)     #torch.compile() (introduced in PyTorch 2.0) wraps your model in a compiled graph module.
-                                            #  After model = torch.compile(model)
-                                            # model is no longer your raw nn.Module
+orig_model=model                            #Raw PyTorch model (used for evaluation, checkpointing, generation)
+model=model.compile(model,dynamic=False)     #torch.compile() (introduced in PyTorch 2.0) wraps your model in a compiled graph module.
+                                                #  After model = torch.compile(model)
+                                                # model is no longer your raw nn.Module
+                                                
 
                                             #That wrapper:
 
@@ -270,5 +271,26 @@ model=model.compile(model,config=False)     #torch.compile() (introduced in PyTo
                                                 # Freezes parts of the structure
                                                 # Guards assumptions
                                                 # Caches kernels
+                                                # Removes Python overhead
+                                                # Optimizes memory + compute scheduling
+
+                                            # dynamic=False because:
+                                                #In training, the shapes are constant throughout: x shape = [batch_size, seq_len]; y shape = [batch_size, seq_len]
+
+
+params_count=model.num_sclaing_params()
+print0("Parameter Counts:")
+for key,value in params_count.items():
+    print0(f"{key:24s}:{value:,}")
+num_params=params_count['total']
+num_flops_per_token = model.estimate_flops()
+print0(f"Estimated FLOPs per token: {num_flops_per_token:e }")
+
+
+
+
+
+
+
 
                                 
