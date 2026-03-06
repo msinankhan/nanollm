@@ -67,7 +67,7 @@ parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding 
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
-parser.add_argument("--target-param-data-ratio", type=float, default=10.5, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
+parser.add_argument("--target-param-data-ratio", type=float, default=20, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
 parser.add_argument("--total-batch-size", type=int, default=-1, help="total batch size in tokens. decent numbers are e.g. 524288. (-1 = auto-compute optimal)")
@@ -167,7 +167,7 @@ def build_model_meta(depth):
     return model_meta
 
 
-model =build_model_meta(args.depth) # 1) Build the model on meta data.
+model = build_model_meta(args.depth) # 1) Build the model on meta data.
 model_config=model.config
 model_config_kwargs=asdict(model_config)
 print0(f"Model Config: \n{json.dumps(model_config_kwargs, indent=2)}")
@@ -287,6 +287,34 @@ num_flops_per_token = model.estimate_flops()
 print0(f"Estimated FLOPs per token: {num_flops_per_token:e }")
 
 
+## 1) Use scaling laws to determine the optimal training horizon in tokens
+
+def get_scaling_params(m):
+    params_count=m.num_sclaing_params()
+    scaling_params=params_count['transformer_matrices'] + params_count['lm_head']
+    return scaling_params
+
+num_sclaing_params = get_scaling_params(model)
+target_tokens=int(args.target_params_data_ratio * num_sclaing_params)
+
+
+
+d12_ref=build_model_meta(12)
+D_REF=args.target_params_data_ratio* get_scaling_params(d12_ref)
+B_REF= 2**19
+
+
+#2) With the token horizons, we calculate the optimal batch sizes. 
+# The optimal batch size grows as approximately D^0.383, so e.g. if D doubles from d12 to d24, B should grow by 2^0.383 ≈ 1.3x.
+
+
+total_batch_size=args.total_batch_size
+if total_batch_size==-1:
+    batch_size_ratio= target_tokens/D_REF
+    predicted_batch_size= B_REF* batch_size_ratio **0.383
+
+    total_batch_size= 2**round(math.log2(predicted_batch_size))
+    print0(f"Auto-complete optimal batch size: {total_batch_size:,} tokens")
 
 
 
