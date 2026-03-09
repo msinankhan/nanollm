@@ -307,6 +307,32 @@ B_REF= 2**19
 #2) With the token horizons, we calculate the optimal batch sizes. 
 # The optimal batch size grows as approximately D^0.383, so e.g. if D doubles from d12 to d24, B should grow by 2^0.383 ≈ 1.3x.
 
+#The Real Principle: μP Scaling
+#When you change model size:
+    # depth ↑
+    # width ↑
+    # parameters ↑
+
+#  The gradient magnitudes change.
+# Which means:
+    # the same learning rate no longer works
+    # the optimizer behaves differently
+    # training may diverge or slow down
+
+# So we need a way to scale hyperparameters so that:    
+    # training behavior stays the same
+    # regardless of model size.
+
+
+#The reference model is the model where hyperparameters are defined.
+# Now we train a bigger model, instead of re-tuning everything, we compute:
+    # param_ratio = new_model_scaling_params / reference_scaling_params
+
+# μP theory says:
+    # If we scale parameters correctly relative to a reference model, then training curves remain invariant
+    # Meaning:
+        # Loss vs tokens looks almost identical across model sizes.
+
 
 total_batch_size=args.total_batch_size
 if total_batch_size==-1:
