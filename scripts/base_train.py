@@ -210,10 +210,10 @@ if args.fp8:
 
         
 
-with disable_fp8(model):
+def disable_fp8(model):
     import torch.nn as nn
     fp8_locations=[]   # list of (parent_module, attr_name, fp8_module)
-    for model, module in model.named_modules():
+    for name, module in model.named_modules():
         if 'Float8' in type(module).__name__:
             if '.' in name:
                 parent_name,attr_name=name.rsplit('.',1)
@@ -300,7 +300,7 @@ target_tokens=int(args.target_params_data_ratio * num_sclaing_params)
 
 
 d12_ref=build_model_meta(12)
-D_REF=args.target_params_data_ratio* get_scaling_params(d12_ref)
+D_REF=args.target_params_data_ratio* get_scaling_params(d12_ref)    #how many tokens the reference model should train on according to scaling laws.
 B_REF= 2**19
 
 
@@ -337,8 +337,78 @@ B_REF= 2**19
 total_batch_size=args.total_batch_size
 if total_batch_size==-1:
     batch_size_ratio= target_tokens/D_REF
-    predicted_batch_size= B_REF* batch_size_ratio **0.383
+    predicted_batch_size= B_REF* batch_size_ratio **0.383   #As you train on more tokens, the optimal batch size should increase. But not linearly.So optimal scaling is roughly: B ∝ D^0.383 which is sublinear growth.
+                                                            #If you don't increase batch size
+                                                                #1) Training becomes inefficient
+                                                                #2) Gradient noise dominates updates.
+                                                            #If you increase batch size too fast, you get:
+                                                                #optimization slowdown
+                                                                #poor generalization
+                                                            # The 0.383 exponent is empirically close to optimal.
 
+
+                                                            #What Happens if We Scale Linearly (B ∝ D)
+
+                                                                # Suppose training tokens increase 10×:
+
+                                                                    # D_new = 10 × D_ref
+
+                                                                # If we scaled batch size linearly:
+
+                                                                    # B_new = 10 × B_ref
+
+                                                                # Now look at the number of parameter updates:
+
+                                                                # updates = total_tokens / batch_size
+
+                                                                # So:
+
+                                                                    # updates_new = (10D) / (10B) = D/B
+
+                                                                 # Meaning:
+
+                                                                    # the number of optimizer steps stays the same
+                                                                    # Why This Is Bad
+
+                                                                    # Even though we train on 10× more data, we perform no additional learning steps.
+
+                                                                # So the model:
+
+                                                                    # sees more tokens
+
+                                                                    # but performs the same number of updates
+
+                                                                 # This causes:
+
+                                                                    # under-optimization
+
+                                                                    # The model cannot properly absorb the additional data.
+
+
+
+                                                                #Batch size controls gradient variance.
+
+                                                                    # Large batch:
+
+                                                                        # low gradient noise
+
+                                                                    # Small batch:
+
+                                                                        # high gradient noise
+
+                                                                    # If we scale batch size too aggressively:
+
+                                                                        # gradient noise → near zero
+
+                                                                    # Then SGD behaves like deterministic gradient descent, which is known to:
+
+                                                                        # converge slower
+
+                                                                        # generalize worse
+
+                                                                    # So linear scaling would:
+
+                                                                        # reduce useful stochasticity
     total_batch_size= 2**round(math.log2(predicted_batch_size))
     print0(f"Auto-complete optimal batch size: {total_batch_size:,} tokens")
 
