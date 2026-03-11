@@ -156,6 +156,6 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         yield inputs, targets, {"pg_idx":pg_idx, "rg_idx":rg_idx, "epoch":epoch}
 
 
-def tokenizing_distributed_data_loader_bos_bestfit(*args,**kwargs):
+def tokenizing_distributed_data_loader_with_bos_bestfit(*args,**kwargs):
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args,**kwargs):
         return inputs, targets

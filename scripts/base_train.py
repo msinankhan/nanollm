@@ -413,8 +413,168 @@ if total_batch_size==-1:
     print0(f"Auto-complete optimal batch size: {total_batch_size:,} tokens")
 
 
+batch_lr_scale=1.0 # If batch_size = reference batch size, the LR should remain the same (because matrix_lr=args.matrix_lr * batch_lr_scale)
+batch_ratio=total_batch_size/B_REF
+if batch_ratio!=1.0:
+    batch_lr_scale = batch_ratio ** 0.5 # We use larger LR for a larger batch, as a gradient computed from a larger batch is less noisy. ; 
+                                        #The gradient we compute is an estimate of the true gradient:
+                                            
+                                        # 𝑔 = ∇𝐿(𝜃) + 𝜖 
+                                            
+                                            
+                                        # where:    
+                                            
+                                        # ∇𝐿(𝜃)= true gradient  
+                                            
+                                        # 𝜖 = stochastic noise from sampling the batch  
+                                            
+                                        #Gradient noise's variance scales : as Var(g) ∝ 1/B, so douobling batch size halves the variace allowing us to increase the LR as when B increases, the gradient estimate becomes more stable, optimizer can take larger steps safely. 
+
+
+                                        # We don't use linear scaling (we do it for SGD) for ADAMW because adam normalizes gradients internally so it needs less aggressive scaling.
+    print0(f"Scaling LRs by {batch_lr_scale:.4f} for batch size {total_batch_size:,} (reference:{B_REF:,})")
 
 
 
+# GOTTA COME BACK TO THIS LATER:
+#calculate the appropriate weight decay scaling using the  batch size and the token horizon.
+
+# Central idea of the paper is that T_epoch = B/(η·λ·D) should remain constant.: https://arxiv.org/abs/2405.13698
+
+# Above, we used learning rate scaling η ∝ √(B/B_ref). So it's a matter of ~10 lines of math to derive that to keep T_epoch constant, we need:
+# λ = λ_ref · √(B/B_ref) · (D_ref/D)
+
+weight_decay_scaled=args.weight_decay * math.sqrt(total_batch_size/B_REF) * (D_REF/target_tokens)
+if weight_decay_scaled != args.weight_decay:
+    print0(f"Scaling weights from {args.weight_decay:.6f} to {weight_decay_scaled:.6f} for depth {args.depth}")
+
+
+optimizer=model.setup_optimizer(
+    # ADAMW hyperparameters
+    unembedding_lr=args.unembedding_lr* batch_lr_scale,
+    embedding_lr=args.embedding_lr*batch_lr_scale,
+    scalar_lr=args.scalar_lr *batch_lr_scale,
+    #Muon Hyperparameters:
+    matrix_lr=args.matrix_lr * batch_lr_scale,
+    weight_decay= weight_decay_scaled
+)
+
+if resuming:
+    optimizer.load_state_dict(optimizer_data)
+    del optimizer_data
+
+
+# scaler= torch.amp.GradScaler() if COMPUTE_DTYPE ==
+
+
+dataloader_resume_state_dict= None if not resuming else meta_data["dataloader_state_dict"]
+train_loader= tokenizing_distributed_data_loader_with_bos_bestfit(tokenizer, args.device_batch_size, split='train', device=device, resume_state_dict=dataloader_resume_state_dict)
+build_val_loader = lambda : tokenizing_distributed_data_loader_with_bos_bestfit(tokenizer, args.device_batch_size, split="val", device=device)
+x,y, dataloader_state_dict= next(train_loader)
+
+assert args.num_iterations >0 or args.target_param_data_ratio>0 or args.target_flops >0
+
+if args.num_iteratins>0:
+    num_iterations=args.num_iterations
+    print0(f"Using user-provided number of iterations; {num_iterations:,}")
+elif args.target_flops>0:
+    num_iterations=round(args.target_flops/(num_flops_per_token * total_batch_size))
+    print0(f"Calculated number of iterations from target FLOPs {num_iterations:,}")
+
+elif args.target_param_data_ratio >0:
+    num_iterations = target_tokens //total_batch_size
+    print0(f"Calculated number of iterations from target data: param ratio: {num_iterations:,}")
+
+else:
+    raise ValueError("No training horizaon specified.")
+
+total_tokens= total_batch_size * num_iterations # Actual number of tokens we train on.
+print0(f"Total number of training tokens: {total_tokens:,}")
+print0(f"Tokens: Scaling params ratio: {total_batch_size* num_iterations/num_sclaing_params:.2f}")
+print0(f"Total training FLOPs estimate  {num_flops_per_token * total_tokens:e}")
 
                                 
+def get_lr_multiplier(it):
+    warmp_iters = args.warmup_steps
+    warmdown_iters= round(args.warmdown_ratio * num_iterations)
+    if it< warmp_iters:
+        return (it +1)/ warmp_iters
+    elif it <=num_iterations - warmdown_iters:
+        return 1.0
+    else:
+        progress = (num_iterations -it) /warmdown_iters
+        return progress *1.0 + (1-progress) * args.final_lr_frac
+    
+
+def get_muon_momentum(it):
+    frac=min(it/400,1)
+    momentum= (1-frac) * 0.85 + frac *0.97     #Warmsup to 0.97 over the first 400 steps.
+    return momentum
+
+
+def get_weight_decay(it):
+    return weight_decay_scaled * 0.5 *(1+math.cost(math.pi * it/num_iterations))  #Cosine decay to zero over the course of training.
+
+
+if not resuming:
+    step=0
+    val_bpb = None 
+    min_val_bpb = float('inf')
+    smooth_train_loss =0
+    total_training_time =0
+else:
+    step=meta_data["step"]
+    loop_state = meta_data["loop_state"]
+    val_bpb=meta_data["val_bpb"]
+    min_val_bpb = loop_state["min_val_bpb"]
+    smooth_train_loss = loop_state["smooth_train_loss"]
+    total_training_time = loop_state["total_training_time"]
+
+# Here we are trying to figure out the needed gradient accumulation micro-steps to reach the desired total batch size per step.
+tokens_per_fwdbwd= args.device_batch_size * args.amx_seq_len #tokens per iteration for a single rank. 
+world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
+assert total_batch_size % world_tokens_per_fwdbwd ==0
+grad_accum_steps= total_batch_size //world_tokens_per_fwdbwd
+print0(f"Tokens/micro-batch/rank: {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
+print0(f"Tokens/micro-batch: {world_tokens_per_fwdbwd:,}")
+print0(f"Total batch size: {total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+
+
+while True:
+    last_step= step==num_iterations 
+    flops_so_far = num_flops_per_token * total_batch_size *step
+
+    if args.eval_every >0 and (last_step or step % args.eval_every==0):
+        model.eval()
+        val_loader=build_val_loader()
+        eval_steps= args.eval_tokens//(args.device_batch_size * args.max_seq_len * ddp_world_size)
+        with disable_fp8(model):
+            val_bpb= evaluate_bpb(model,val_loader, eval_steps, token_bytes)
+        print0(f"Step {step:05d} | Validation bpb : {val_bpb:.6f}")
+        if val_bpb < min_val_bpb:
+            min_val_bpb = val_bpb
+        wandb_run.log({
+            "step":step,
+            "total_training_flops":flops_so_far,
+            "total_training_time":total_training_time,
+            "val/bpb":val_bpb,
+        })
+        model.train()
+
+        results={}
+        if args.core_metrix_every >0 and (last_step or (step>0 and step & args.core_metric_every ==0)):
+            model.eval()
+            with disable_fp8(orig_model):
+                results= evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
+
+            print0(f"Step {step:05d} | CORE metric: {results['core_metric']:.4f}")
+            wandb_run.log({
+                "step":step,
+                "total_training_flops":flops_so_far,
+                "core_metric": results['core_metric'],
+                "centered_results": results['centered_results']
+            })
+            model.train()
+
+
+            
