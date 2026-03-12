@@ -262,7 +262,7 @@ class Engine:
             logits=self.model.forward(ids, kv_cache=kv_cache_decode)[:,-1,:]   #(B, Vocab_size)
 
 
-    def generte_batch(self,tokens,num_samples=1,**kwargs):
+    def generate_batch(self,tokens,num_samples=1,**kwargs):
         assistant_end=self.tokenizer.encode_special("<|assistant_end|>")
         bos=self.tokenizer.get_bos_token()
         results=[tokens.copy() for _ in range(num_samples)]

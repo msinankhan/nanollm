@@ -576,5 +576,46 @@ while True:
             })
             model.train()
 
+        if args.sample_every >0 and master_process and (last_step or (step>0 and step % args.sample_every==0)):
+            model.eval()
+            prompts=[
+                "The capital of France is",
+                "The chemical symbol of gold is",
+                "If yesterday was Friday, then tomorrow will be",
+                "The opposite of hot is",
+                "The planets of the solar system are:",
+                "My favorite color is",
+                "If 5*x +3 =13, then x is",
+            ]
+            engine=Engine(orig_model,tokenizer)
+            for prompt in prompts:
+                tokens=tokenizer(prompt, prepend="<|bos|>")
+                with disable_fp8(orig_model):
+                    sample, _=engine.generate_batch(tokens, num_samples=1, max_tokens=16, temperature=0)
+                print0(tokenizer.decode(sample[0]))
 
-            
+            model.train()
+
+            if last_step or (step>0 and step!= args.resume_from_step and args.save_every>0 and step%args.save_every==0):
+                save_checkpoint(
+                    checkpoint_dir,
+                    step,
+                    orig_model.state_dict(),
+                    optimizer.state_dict(),
+                    {
+                        "step":step,
+                        "val_bpb": val_bpb,
+                        "model_config": model_config_kwargs,
+                        "user_config": user_config,
+                        "device_batch_size": args.device_batch_size,
+                        "max_seq_len":args.max_seq_len,
+                        "total_batch_size": total_batch_size,
+                        "dataloader_state_dict": dataloader_state_dict,
+                        "loop_state":{
+                            "min_val_bpb": min_val_bpb,
+                            "smooth_train_loss": smooth_train_loss,
+                            "total_training_time":total_training_time,
+                        },
+                    },
+                    rank=ddp_rank,
+                )
