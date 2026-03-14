@@ -622,5 +622,42 @@ while True:
             if last_step: # termination conditions (TODO: possibly also add loss explosions etc.)
                 break
 
-            synchronize()
+            synchronize() #It forces the CPU to wait until all GPU kernels finish. because GPUs are async and if t1-t0 will be wrong as the CPU continues with the script if we don't synchronize and the time diff is calculated on the CPU.
+            t0=time.time()
+            for micro_step in range(grad_accum_steps):
+                loss=model(x,y)     #The model wants an effective batch size: total_batch_size
+                                    #But GPU memory only allows:device_batch_size
+                                    #So we simulate a large batch using multiple smaller batches.
+
+                                    # Example:
+                                    # total_batch_size = 524k tokens
+                                    # micro_batch = 64k tokens
+                                    # grad_accum_steps = 8
+
+                                    #Training becomes:
+                                    # forward/backward 8 times
+                                    # accumulate gradients
+                                    # then update weights once
+
+                train_loss=loss.detach() # for logging: We need to detach it from the computation graph to prevent GPU memory leak. detach() creates the same tensor but it doesn't track gradients.
+
+                loss=loss/grad_accum_steps  # each .backward() is a grad sum => normalize loss here
+
+                # if scaler is not None:
+                #     scaler.scale(loss).backward()
+                # else:
+                loss.backward()
+                x,y,dataloader_state_dict=next(train_loader) #GPU → running backward pass
+                                                             # CPU → loading next data batch
+
+            #End of Micro-Step Loop
+
+
+            # Step the optimizer:
+
+            lrm=get_lr_multiplier(step)   #This dynamically adjusts: learning rate, optimizer momentum weight decay.
+            muon_momentum=get_muon_momentum(step) # Based on training step.
+            muon_weight_decay=get_weight_decay(step)
+
             
+
