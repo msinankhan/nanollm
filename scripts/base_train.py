@@ -619,3 +619,8 @@ while True:
                     },
                     rank=ddp_rank,
                 )
+            if last_step: # termination conditions (TODO: possibly also add loss explosions etc.)
+                break
+
+            synchronize()
+            
