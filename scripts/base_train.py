@@ -12,7 +12,7 @@ import torch
 
 from nanollm.gpt import GPT, GPTConfig
 from nanollm.dataloader import tokenizing_distributed_data_loader_with_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
-from nanollm.common import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops
+from nanollm.commons import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops
 from nanollm.tokenizer import get_tokenizer, get_token_bytes    
 from nanollm.checkpoint_manager import save_checkpoint, load_checkpoint
 from nanollm.loss_eval import evaluate_bpb
@@ -659,5 +659,125 @@ while True:
             muon_momentum=get_muon_momentum(step) # Based on training step.
             muon_weight_decay=get_weight_decay(step)
 
+            for group in optimizer.param_groups:
+                group['lr'] = group['initial_lr'] *lrm
+                if group['kind'] == 'muon':
+                    group['momentum'] = muon_momentum
+                    group["weight_decay"] = muon_weight_decay
+
+            # if scaler is not None:
+            #     scaler.unscale_(optimizer)
+            #     # In distributed training, all ranks must agree on whether to skip the step.
+            #     # Each rank may independently encounter inf/nan gradients, so we all-reduce
+            #     # the found_inf flag (MAX = if any rank found inf, all ranks skip).
+            #     if is_ddp_initialized():                                                       #All DDP workers must perform the exact same sequence of optimizer steps. Otherwise the models diverge.
+            #         for v in scaler._found_inf_per_device(optimizer).values():                 #Without synchronization:
+                                                                                                    #GPU0 → optimizer.step() executed
+                                                                                                    #GPU1 → optimizer.step() skipped
+
+                                                                                                #Now the weights become:
+
+                                                                                                    #GPU0 → W_(t+1)
+                                                                                                    #GPU1 → W_t
+
+                                                                                                #Now the models no longer match.    
+            #             dist.all_reduce(v, op=dist.ReduceOp.MAX)
+            #     scaler.step(optimizer)
+            #     scaler.update()
+            # else:
+            optimizer.step()
+            model.zero_grad(set_to_none=True)
+            train_loss_f=train_loss.item() #.item() forces GPU sync, because CPU must wait for the value.
+            synchronize()
+            t1=time.time()
+            dt=t1-t0
+
             
 
+            ema_beta=0.9
+            smooth_train_loss = ema_beta * smooth_train_loss + (1-ema_beta) * train_loss_f
+            debiased_smooth_loss = smooth_train_loss / (1-ema_beta**(step+1))
+            pct_done=100*step/num_iterations
+            token_per_sec=int(total_batch_size/dt)
+            flops_per_sec = num_flops_per_token * total_batch_size/dt
+            mfu = 100 * flops_per_sec /(gpu_peak_flops * ddp_world_size)
+
+            if step >10:
+                total_training_time+=dt
+
+            steps_done = step -10
+
+            if steps_done >0:
+                avg_time_per_step = total_training_time / steps_done
+                remaining_steps = num_iterations - step
+                eta_seconds = remaining_steps * avg_time_per_step
+                eta_str = f" | eta: {eta_seconds/60:.1f}m"
+            else:
+                eta_str=""
+
+            epoch= f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
+            print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm:{lrm:.2f} | dt:{dt*1000:.2f}ms | tok/sec: {token_per_sec:,} | bf15_mfu: {mfu:.2f} | epoch: {epoch} | total_time: {total_training_time/60:.2f}m{eta_str}")
+
+            if step %100 ==0:
+                log_data={
+                    "step":step,
+                    "total_training_flops": flops_so_far,
+                    "train/loss": debiased_smooth_loss,
+                    "train/lrm" : lrm,
+                    "train/dt" : dt,
+                    "train/tok_per_sec": token_per_sec,
+                    "train/mfu":mfu,
+                    "train/epoch":epoch
+                }
+
+                wandb_run.log(log_data)
+
+
+            first_step_of_run = (step==0) or (resuming and step == args.resume_from_step)
+            step+=1
+
+            if first_step_of_run:
+                gc.collect()
+                gc.freeze()
+                gc.disable()
+
+            elif step %5000 ==0:
+                gc.collect()
+
+            
+            print0(f"Peak memory usage: {get_max_memory()/1024/1024:.2f}MiB")
+            print0(f"Total training time: {total_training_time/60:.2f}m")
+
+            if val_bpb is not None:
+                print0(f"Minimum validation bpb: {min_val_bpb:.6f}")
+
+
+            from nanollm.report import get_report
+            get_report().log(section="Base Model Training", data=[
+                user_config,
+                {
+                    "NUmber of parameters": num_params,
+                    "Number of FLOPs per token": f"{num_flops_per_token:e}",
+                    "Calculated number of iterations":num_iterations,
+                    "Number of training tokens": total_tokens,
+                    "Tokens: Scaling params ratio": total_batch_size * num_iterations / num_sclaing_params,
+                    "DDP World Size" : ddp_world_size,
+                    "warmup_steps": args.warmup_steps,
+                    "warmdown_ratio": args.warmdown_ratio,
+                    "final_lr_frac": args.final_lr_frac,
+
+
+                },
+                {
+                    "Minimum validation bpb": min_val_bpb if val_bpb is not None else None,
+                    "Final validation bpb": val_bpb,
+                    "CORE Metric Estimate": results.get("core_metric", None),
+                    "MFU %": f"{mfu:.2f}%",
+                    "Total training flops": f"{flops_so_far:e}",
+                    "Total training time":f"{total_training_time/60:.2f}m",
+                    "Peak Memory Usage": f"{get_max_memory()/1024/1024:.2f}MiB",
+                }
+            ])
+
+            wandb_run.finish()
+            compute_cleanup()
