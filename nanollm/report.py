@@ -11,6 +11,8 @@ import torch
 def run_command(cmd):
     try:
         result=subprocess.run(cmd,shell=True,capture_output=True, text=True, timeout=5)
+        if result.stdout.strip():
+            return result.stdout.strip()
         if result.returncode==0:
             return result.stdout.strip()
         return None
