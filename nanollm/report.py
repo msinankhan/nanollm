@@ -61,8 +61,8 @@ def get_system_info():
 
     info['hostname']= socket.gethostname()
     info['platform'] = platform.system()
-    info['python_versioin']= platform.python_version()
-    info['torch_versioin']=torch.__version__
+    info['python_version']= platform.python_version()
+    info['torch_version']=torch.__version__
 
 
     info['cpu_count']=psutil.cpu_count(logical=False)
