@@ -124,12 +124,26 @@ Generated: {timestamp}
 
 """
 
-    # bloat metrics: package all of the source code and assess its weight
-    packaged = run_command('files-to-prompt . -e py -e md -e rs -e html -e toml -e sh --ignore "*target*" --cxml')
-    num_chars = len(packaged)
-    num_lines = len(packaged.split('\n'))
-    num_files = len([x for x in packaged.split('\n') if x.startswith('<source>')])
-    num_tokens = num_chars // 4 # assume approximately 4 chars per token
+        # bloat metrics: count lines/chars in git-tracked source files only
+    extensions = ['py', 'md', 'rs', 'html', 'toml', 'sh']
+    git_patterns = ' '.join(f"'*.{ext}'" for ext in extensions)
+    files_output = run_command(f"git ls-files -- {git_patterns}")
+    file_list = [f for f in (files_output or '').split('\n') if f]
+    num_files = len(file_list)
+    num_lines = 0
+    num_chars = 0
+    if num_files > 0:
+        wc_output = run_command(f"git ls-files -- {git_patterns} | xargs wc -lc 2>/dev/null")
+        if wc_output:
+            total_line = wc_output.strip().split('\n')[-1]
+            parts = total_line.split()
+            if 'total' in parts:
+                num_lines = int(parts[0])
+                num_chars = int(parts[1])
+            elif len(parts) >= 2:
+                num_lines = int(parts[0])
+                num_chars = int(parts[1])
+    num_tokens = num_chars // 4 
 
     # count dependencies via uv.lock
     uv_lock_lines = 0
