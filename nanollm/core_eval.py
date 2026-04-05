@@ -207,7 +207,7 @@ def evaluate_example(idx,model,tokenizer,data,device,task_meta):
     elif task_type=="schema":
         prompts=render_prompts_schema(item,continuation_delimiter,fewshot_examples)
         tokens,start_idx,end_idx=batch_sequences_schema(tokenizer,prompts)
-    elif task_meta=="language_modeling":
+    elif task_type=="language_modeling":
         prompts=render_prompt_lm(item,continuation_delimiter,fewshot_examples)
         tokens,start_idx,end_idx=batch_sequences_lm(tokenizer,prompts)
 
@@ -274,7 +274,7 @@ def evaluate_task( model,tokenizer,data,device,task_meta):
 
     if world_size>1:
         dist.barrier()
-        dist.all_reduce(correct, op=dist.ReduceOP.SUM) #gradient synchronization in DDP
+        dist.all_reduce(correct, op=dist.ReduceOp.SUM) #gradient synchronization in DDP
 
     mean_correct=correct.mean().item()
 

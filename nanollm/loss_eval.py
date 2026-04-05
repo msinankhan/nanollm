@@ -12,12 +12,12 @@ def evaluate_bpb(model,batches,steps,token_bytes):
         
          This normalizes the loss by the number of bytes that the target tokens represent."""
 
-    total_nats=torch.tensor(0,dtype=torch.float32,device=model.get_device())
+    total_nats=torch.tensor(0.0,dtype=torch.float32,device=model.get_device())
     total_bytes=torch.tensor(0, dtype=torch.int64, device=model.get_device())
 
     batch_iter=iter(batches)
     for _ in range(steps):
-        x,y=next(batch_iter)
+        x,y, _=next(batch_iter)
         loss2D=model(x,y,loss_reduction='none') #(B,T)
         loss2D=loss2D.view(-1) #(B*T)
         y=y.view(-1) # Flatten

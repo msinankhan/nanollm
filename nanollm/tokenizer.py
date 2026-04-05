@@ -88,7 +88,6 @@ class RustBPETokenizer:
         return self.bos_token_id
     
     def encode(self,text,prepend=None, append=None, num_threads=8):
-
         if prepend is not None:
             prepend_id=prepend if isinstance(prepend,int) else self.encode_special(prepend)
 
@@ -123,7 +122,7 @@ class RustBPETokenizer:
     
 
     def __call__(self, *args, **kwargs):
-        return self.encode(*args,*kwargs)
+        return self.encode(*args,**kwargs)
 
 
     def decode(self,ids):
@@ -273,7 +272,7 @@ def get_token_bytes(device="cpu"):
     from nanollm.commons import get_base_dir
 
     base_dir=get_base_dir()
-    tokenizer_dir=os.path.join(base_dir, "tokenizer")
+    tokenizer_dir=os.path.join(base_dir, "tokenizer_dir")
     token_bytes_path=os.path.join(tokenizer_dir, "token_bytes.pt")
 
     assert os.path.exists(token_bytes_path), f" Token bytes not found at {token_bytes_path}? It gets written by tok_train.py."

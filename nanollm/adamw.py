@@ -6,11 +6,11 @@ from torch import Tensor
 class DistAdam(torch.optim.Optimizer):
     def __init__(self, param_groups,lr:float=1e-3, betas:tuple[float,float]=(0.9,0.999), eps:float=1e-8,weight_decay:float=0.01):
         defaults=dict(lr=lr,betas=betas,eps=eps,weight_decay=weight_decay)
-        super.__init__(param_groups,defaults)
+        super().__init__(param_groups,defaults)
 
 
     @torch.compile
-    @torch.grad
+    @torch.no_grad()
     def step(self):
         rank=dist.get_rank()
         world_size=dist.get_world_size()
@@ -26,7 +26,7 @@ class DistAdam(torch.optim.Optimizer):
                 rank_size=grad.shape[0]//world_size
                 grad_slice=torch.empty_like(grad[:rank_size])
 
-                reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slices,grad, op=dist.ReduceOP.AVG, async_op=True).get_future())
+                reduce_scatter_futures.append(dist.reduce_scatter_tensor(grad_slice,grad, op=dist.ReduceOp.AVG, async_op=True).get_future())
 
                 grad_slices.append(grad_slice)
 
@@ -34,7 +34,7 @@ class DistAdam(torch.optim.Optimizer):
         idx=0
 
         for group in self.param_groups:
-            beta1,beta2=group['beta']
+            beta1,beta2=group['betas']
             eps=group['eps']
             wd=group['weight_decay']
 
@@ -70,14 +70,14 @@ class DistAdam(torch.optim.Optimizer):
                     eff_weight_decay=lr*wd*getattr(p,"wd_mul",1.0)
                     p_slice.mul_(1-eff_weight_decay)
 
-                exp_avg.mul_(beta1).add_(g_slice,aplha=1-beta1)
+                exp_avg.mul_(beta1).add_(g_slice,alpha=1-beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(g_slice, g_slice, value=1-beta2)
 
                 bias1=1-beta1**t
                 bias2=1-beta2**t
 
-                denom=(exp_avg_sq/bias2).sqrt().add_(eps)
-                step_size=lr/bias1
+                denom=exp_avg_sq.sqrt().add_(eps)
+                step_size=lr*(torch.sqrt(bias2)/bias1)
                 update=exp_avg.div(denom).mul_(step_size)
                 p_slice.add_(other=update, alpha=1.0)
 

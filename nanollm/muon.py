@@ -4,7 +4,7 @@ import torch.distributed as dist
 
 @torch.compile
 def zeropower_via_newtonschulz5(G:Tensor, steps:int) -> Tensor:
-    assert G.ndims>=2
+    assert G.ndim>=2
     a,b,c=(3.4445,-4.7750,2.0315)
 
     X=G.bfloat16()
@@ -14,12 +14,12 @@ def zeropower_via_newtonschulz5(G:Tensor, steps:int) -> Tensor:
                                # hence the A becomes bigger if row is bigger than column in X.
 
 
-        X=X/(X.norm(dim=(-2,-1),keepdim=True)+1e-7) # Here we are calculating the Frobenius norm, which helps the Newton Schulz iteration converge by ensuring ||I-X.X^T||<1. 
+    X=X/(X.norm(dim=(-2,-1),keepdim=True)+1e-7) # Here we are calculating the Frobenius norm, which helps the Newton Schulz iteration converge by ensuring ||I-X.X^T||<1. 
                                                     #It basically shrinks Eigenvalues to a safe range. The (+1e-7) term simply prevents division by 0.
 
 
         #NEW-SCHULZ Iteration:
-        """
+    """
         Here we are trying to approximate the ratatory vectors without performing SVD
         X(X^T.X)^-1/2 approximates to U.V^T
         
@@ -27,18 +27,18 @@ def zeropower_via_newtonschulz5(G:Tensor, steps:int) -> Tensor:
         
         Also, because we are approximating the square root, we will still have singular values, but they end up in a Uniform(0.5, 1.5), which is good enough for learing.
         
-        """
+    """
 
-        for _ in range(steps):
-            A=X@X.mT
-            B=b*A+c*A@A
-            X=a*X+B@A
+    for _ in range(steps):
+        A=X@X.mT
+        B=b*A+c*A@A
+        X=a*X+B@X
 
 
-        if G.size(-2)>G.size(-1):
-            X=X.mT      #Undo earlier transpose.
+    if G.size(-2)>G.size(-1):
+        X=X.mT      #Undo earlier transpose.
 
-        return X # It returns ≈U.V^T (not exact, but directionally correct.)
+    return X # It returns ≈U.V^T (not exact, but directionally correct.)
     
 
 class Muon(torch.optim.Optimizer):
@@ -101,7 +101,7 @@ class DistMuon(torch.optim.Optimizer):
         defaults=dict(lr=lr, momentum=momentum, nesterov=nesterov,ns_steps=ns_steps)
         params=list(params)
 
-        assert all(p.ndims==2 for p in params), "Muon expects 2D parameters only."
+        assert all(p.ndim==2 for p in params), "Muon expects 2D parameters only."
 
         rank=dist.get_rank()
 
@@ -116,9 +116,9 @@ class DistMuon(torch.optim.Optimizer):
             assert all(p.dtype==dtype for p in group_params)
 
             if rank==0:
-                print(f"Muon: Grouping {group_params} of shape {shape}, {device}, and dtype: {dtype}")
+                print(f"Muon: Grouping {len(group_params)} of shape {shape}, {device}, and dtype: {dtype}")
 
-            param_groups.append(dict(params=group_params,zero_buffer=torch.zeros_like(group_params[0])))    # Zero Buffer is a placeholder tensor
+            param_groups.append( dict(params=group_params, zero_buffer=torch.zeros_like(group_params[0]) , kind='muon' ) )    # Zero Buffer is a placeholder tensor
                                                                                                             # Used to pad reduce_scatter / all_gather calls
                                                                                                             # Required when number of params ≠ world_size
 
@@ -174,7 +174,7 @@ class DistMuon(torch.optim.Optimizer):
 
             for base_i in range(0,len(params), world_size):
                 owner_idx=base_i + rank
-                all_gather_futures[future_idx].wait()     #Orthogonalization is expensive
+                all_reduce_futures[future_idx].wait()     #Orthogonalization is expensive
                 future_idx+=1                             # Doing it on every GPU is wasteful
                                                           # So: one GPU computes, others wait
                 
@@ -182,19 +182,31 @@ class DistMuon(torch.optim.Optimizer):
                 if owner_idx<len(params):
                     p=params[owner_idx]
                     g=p.grad
+
+                    if g is None:
+                        # This would be a real error — this rank owns this param but has no grad
+                        raise RuntimeError(
+                            f"Rank {rank}: owner param at index {owner_idx} has no grad. "
+                            f"Did you call loss.backward() before step()?"
+                        )
+                    
                     state=self.state[p]
 
-                    if "momnetum_buffer" not in state:
+                    if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)
 
                     buf: Tensor=state["momentum_buffer"]
-                    buf.lerp_(g,1.0-state["momentum"])
+                    buf.lerp_(g,1.0-group["momentum"])
 
                     g=g.lerp_(buf,group["momentum"]) if group["nesterov"] else buf
 
                     g=zeropower_via_newtonschulz5(g, steps=group["ns_steps"])
 
-                    scale=max((1.0, p.size(-2)/p.size(-1))**0.5)
+                    # if g is None:
+                    #     print(f"Rank {rank}: p.grad is None for param at index {owner_idx}")
+                    #     continue
+
+                    scale = (max(1.0, p.size(-2) / p.size(-1)) ** 0.5)
 
                     p.add_(g,alpha=-group["lr"]*scale)
 

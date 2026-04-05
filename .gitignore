@@ -3,7 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 uv.lock
-
+base_checkpoints/*
+eval_bundle/*
+wandb/*
+eval_bundle.zip
+eval_bundle.zip.lock
 # C extensions
 *.so
 

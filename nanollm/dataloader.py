@@ -106,7 +106,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     row_capacity=T+1
     doc_buffer=[]
     batches=_document_batches(split,resume_state_dict, tokenizer_batch_size)
-    bos_token=tokenizer.get_bos_token_id()
+    bos_token=tokenizer.get_bos_token()
     pg_idx,rg_idx,epoch=0,0,1
 
     def refill_buffer():
@@ -121,7 +121,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         for _ in range(B):
             row=[]
             while len(row) < row_capacity:
-                while(doc_buffer)< buffer_size:
+                while len(doc_buffer)< buffer_size:
                     refill_buffer() # We fill the doc_buffer with 999 document's tokens
 
                 remaining=row_capacity-len(row)
@@ -150,12 +150,12 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         use_cuda=device=="cuda"
 
         batch_tensor=torch.tensor(rows,dtype=torch.long, pin_memory=use_cuda)
-        inputs=batch_tensor[:,:-1].to(device=device, non_blocing=use_cuda)
-        targets=batch_tensor[:,1:].to(device=device, non_blocking=use_cuda)
+        inputs=batch_tensor[:,:-1].to(device=device, non_blocking=use_cuda)
+        targets=batch_tensor[:,1:].to(device=device, non_blocking=use_cuda) #TODO:cpu_buffer, gpu_buffer.
 
         yield inputs, targets, {"pg_idx":pg_idx, "rg_idx":rg_idx, "epoch":epoch}
 
 
 def tokenizing_distributed_data_loader_with_bos_bestfit(*args,**kwargs):
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args,**kwargs):
-        return inputs, targets
+        yield inputs, targets , state_dict

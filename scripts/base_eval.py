@@ -12,7 +12,7 @@ from contextlib import nullcontext
 
 import torch
 
-from nanollm.common import compute_init,compute_cleanup, print0,get_base_dir, autodetect_device_type, download_file_with_lock
+from nanollm.commons import compute_init,compute_cleanup, print0,get_base_dir, autodetect_device_type, download_file_with_lock
 from nanollm.tokenizer import get_token_bytes
 from nanollm.checkpoint_manager import load_model
 from nanollm.core_eval import evaluate_task
@@ -71,7 +71,7 @@ def evaluate_core(model,tokenizer,device,max_per_task=1):
         task_meta={
             'task_type': task['icl_task_type'],
             'dataset_uri': task['dataset_uri'],
-            'new_fewshot' : task['new_fewshot'][0],
+            'num_fewshot' : task['num_fewshot'][0],
             'continuation_delimiter': task.get('continuation_delimiter', ' ')
         }
 
@@ -90,11 +90,12 @@ def evaluate_core(model,tokenizer,device,max_per_task=1):
 
         accuracy=evaluate_task(model,tokenizer, data, device, task_meta)
         results[label] = accuracy
-        random_baseline = random_baseline[label]
+        random_baseline = random_baselines[label]
         centered_result=(accuracy-0.01 * random_baseline) /(1.0-0.01*random_baseline)
         centered_results[label] =centered_result
         elapsed=time.time() - start_time
-        print0(f"accuracy: {accuracy: .4f} | centered: {centered_results: .4f} | time: {elapsed:.2f}s")
+        print0(f"accuracy: {accuracy: .4f} | centered: {centered_result: .4f} | time: {elapsed:.2f}s")
+
 
     
     core_metric=sum(centered_results.values()) /len(centered_results)
@@ -129,9 +130,9 @@ def main():
 
     device_type=autodetect_device_type() if args.device_type =='' else args.device_type
     ddp,ddp_rank,ddp_local_rank, ddp_world_size,device=compute_init(device_type)
-    autocast_ctx=torch.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=='cuda' else nullcontext()
+    # autocast_ctx=torch.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=='cuda' else nullcontext()
     
-    model,tokenizer,meta=load_model("base",device, phase="eval",model_tags=args.model_tags,step=args.step)
+    model,tokenizer,meta=load_model("base",device, phase="eval",model_tag=args.model_tag,step=args.step)
 
     sequence_len=meta["model_config"]["sequence_len"]
     token_bytes=get_token_bytes(device=device)
@@ -142,11 +143,11 @@ def main():
     print0(f"Eval Nodes: {','.join(sorted(eval_modes))}")
 
     core_results=None
-    bpb_results=[]
+    bpb_results={}
     samples=[]
     unconditional_samples=[]
 
-    if sample in eval_modes:
+    if 'sample' in eval_modes:
         print0("\n"+"="*80)
         print0("Model Samples")
         print0("\n"+"="*80)
@@ -169,20 +170,19 @@ def main():
             for prompt in prompts:
                 tokens=tokenizer(prompt, prepend="<|bos|>")
 
-                with autocast_ctx:
-                    sample, _ =engine.generate_batch(tokens,num_samples=1, max_tokens=16,temperature=0)
+                sample, _ =engine.generate_batch(tokens,num_samples=1, max_tokens=16,temperature=0)
 
                 sample_str=tokenizer.decode(sample[0])
                 print0("-" * 80)
                 print0(sample_str)
+                samples.append(sample_str)
 
 
             print0("\nUnconditioned samples:")
 
             tokens=tokenizer("", prepend="<|bos|>")
 
-            with autocast_ctx:
-                uncond,_ = engine.generate_batch(tokens,num_samples=8,max_tokens=128,temperature=1.0)
+            uncond,_ = engine.generate_batch(tokens,num_samples=8,max_tokens=128,temperature=1.0)
 
             for sample in uncond:
                 sample_str=tokenizer.decode(sample)
@@ -211,8 +211,7 @@ def main():
                 device=device
             )
 
-            with autocast_ctx:
-                bpb = evaluate_bpb(model, loader, steps, token_bytes)
+            bpb = evaluate_bpb(model, loader, steps, token_bytes)
 
             bpb_results[split_name] = bpb
             print0(f"{split_name} bpb : {bpb:.6f}")
@@ -223,11 +222,7 @@ def main():
         print0("CORE Evaluation")
         print0("="*80)
 
-        with autocast_ctx:
-            core_results = evaluate_core( model,
-                                          tokenizer,
-                                          device,
-                                          max_per_task=args.max_per_task)
+        core_results = evaluate_core( model, tokenizer, device, max_per_task=args.max_per_task)
 
         
         if ddp_rank==0:
@@ -257,8 +252,8 @@ def main():
         report_data.append(core_results["centered_results"])
 
     if bpb_results:
-        report[0]["train bpb"] = bpb_results.get("train")
-        report[0]["val bpb"] = bpb_results.get("val")
+        report_data[0]["train bpb"] = bpb_results.get("train")
+        report_data[0]["val bpb"] = bpb_results.get("val")
 
 
     if samples:

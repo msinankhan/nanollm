@@ -100,7 +100,7 @@ class KVCache:
 
         """Copies KV from another cache into this one.
         Will be used when we want to generate multiple samples in parallel. """
-        assert self.get_pos==0, f"Cannot fill a non-empty cache"
+        assert self.get_pos()==0, f"Cannot fill a non-empty cache"
         assert self.n_layers==other.n_layers and self.n_heads==other.n_heads and self.head_dim==self.head_dim
         assert self.max_seq_len>=other.max_seq_len
 
@@ -115,8 +115,8 @@ class KVCache:
 def sample_next_token(logits,rng,temperature=1.0,top_k=None):
     assert temperature>=0.0, f"Temperature has to be non-negative:{temperature}"
 
-    if temperature==0:
-        return torch.argmax(logits,dims=-1,keepdim=True)
+    if temperature==0.0:
+        return torch.argmax(logits,dim=-1,keepdim=True)
     if top_k is not None and top_k>0:
         k=min(top_k,logits.size(-1))
         vals,idx=torch.topk(logits,k,dim=-1)
@@ -163,7 +163,7 @@ class Engine:
         assert isinstance(tokens,list) and isinstance(tokens[0],int), "Expecting a list of int."
         device=self.model.get_device()
 
-        dtype=torch.bfloat16 if device=="cuda" else torch.float32
+        dtype=torch.bfloat16 if device.type=="cuda" else torch.float32
         rng=torch.Generator(device=device)
         rng.manual_seed(seed)
 
@@ -183,16 +183,16 @@ class Engine:
         kv_cache_prefill=KVCache(
             batch_size=1, # First, generate only one sample for the next token
             seq_len=len(tokens), 
-            device= device, dtype = dtype
+            device=device, dtype=dtype,
             **kv_model_kwargs
         )
         ids = torch.tensor([tokens], dtype=torch.long, device=device)
-        logits=self.model.forward(ids,kv_cache_prefill)
+        logits=self.model.forward(ids,kv_cache=kv_cache_prefill)
 
         logits=logits[:,-1,:].expand(num_samples,-1) # The shape of logits is (B,T,V) in this case (1,T,V). We only need the last token preds, hence (:,-1,:) and we expand it to num_samples 
                                                      # Expand simply broadcasts the same tensor along the.    
 
-        kv_length_hint=(len(tokens)+max_tokens) if max_tokens is not None else m.sequence_len
+        kv_length_hint=(len(tokens)+max_tokens) if max_tokens is not None else self.model.config.sequence_len
         kv_cache_decode=KVCache(
             batch_size=num_samples,
             seq_len=kv_length_hint,
@@ -278,7 +278,7 @@ class Engine:
                         completed[i] = True
                     else:
                         results[i].append(token)
-                        mask[i].append(mask)
+                        masks[i].append(mask)
             
             if all(completed):
                 break
@@ -291,12 +291,12 @@ class Engine:
         import time
         device_type=autodetect_device_type()
         ddp,ddp_rank,ddp_local_rank,ddp_world_size,device=compute_init(device_type)
-        autocast_ctx=torch.amp.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=="cuda" else nullcontext()
+        # autocast_ctx=torch.amp.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=="cuda" else nullcontext()
 
         model,tokenizer,meta=load_model("base",device,phase="eval")
         bos_token_id=tokenizer.bos_token_id()
         
-        kwargs=dict(max_tokens=42,temperature=0.0)
+        kwargs=dict(max_tokens=64,temperature=0.0)
 
         prompt_tokens=tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
 
@@ -305,11 +305,10 @@ class Engine:
         t0=time.time()
         stream=model.generate(prompt_tokens,**kwargs)
 
-        with autocast_ctx:
-            for token in stream:
-                generate_tokens.append(token)
-                chunk=tokenizer.decode([token])
-                print(chunk,end="",flush=True)
+        for token in stream:
+            generate_tokens.append(token)
+            chunk=tokenizer.decode([token])
+            print(chunk,end="",flush=True)
 
         print()
         torch.cuda.synchronize()
@@ -325,12 +324,11 @@ class Engine:
         torch.cuda.synchronize()
         t0=time.time()
 
-        with autocast_ctx:
-            for token_column,token_masks in stream:
-                token=token_column[0]
-                generated_tokens.append(token)
-                chunk=tokenizer.decode([token])
-                print(chunk,end="", flush=True)
+        for token_column,token_masks in stream:
+            token=token_column[0]
+            generated_tokens.append(token)
+            chunk=tokenizer.decode([token])
+            print(chunk,end="", flush=True)
 
 
         print()
@@ -338,6 +336,12 @@ class Engine:
         torch.cuda.synchronize()
         t1=time.time()
         print(f"Engine time: {t1-t0:.2f}s")
+
+        for i in range(len(reference_ids)):
+            if reference_ids[i] != generated_tokens[i]:
+                print(f"Mismatch at {i}: {reference_ids[i]} != {generated_tokens[i]}")
+                break
+        print(f"Match: {reference_ids == generated_tokens}")
 
 
 

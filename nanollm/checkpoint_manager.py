@@ -26,9 +26,9 @@ def _patch_missing_config_keys(model_config_kwargs):
 def _patch_missing_keys(model_data,model_config):
     n_layer=model_config.n_layer
 
-    if "resid_lambda" not in model_data:
-        model_data["resid_lambda"] = torch.ones(n_layer)
-        log0(f"Patching missing resid_lambda in model data to 1 .")
+    if "resid_lambdas" not in model_data:
+        model_data["resid_lambdas"] = torch.ones(n_layer)
+        log0(f"Patching missing resid_lambdas in model data to 1 .")
 
     if "x0_lambdas" not in model_data:
         model_data["x0_lambda"] = torch.zeros(n_layer)
@@ -154,7 +154,7 @@ def load_model_from_dir(checkpoint_dir, device, phase, model_tag=None, step=None
 
 def load_model(source,*args,**kwargs):
     model_dir={
-        "base":"base_checkpoint",
+        "base":"base_checkpoints",
         "mid":"mid_checkpoint",
         "sft":"chatsft_checkpoint",
         "rl": "chatrl_checkpoint"
