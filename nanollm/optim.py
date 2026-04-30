@@ -41,6 +41,7 @@ def adamw_step_fused(
     p.add_(exp_avg / denom, alpha=-step_size)
 
 # -----------------------------------------------------------------------------
+
 """
 Muon optimizer adapted and simplified from modded-nanogpt.
 https://github.com/KellerJordan/modded-nanogpt
