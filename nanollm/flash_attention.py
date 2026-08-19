@@ -54,6 +54,8 @@ def _resolve_use_fa3():
 
     return False
 
+_Use_FA3 = _resolve_use_fa3()
+
 
 def _sdpa_attention(q,k,v,window_size, enable_gqa): 
     Tq=q.size(2)
@@ -67,8 +69,8 @@ def _sdpa_attention(q,k,v,window_size, enable_gqa):
     if Tq==1:
         if window>=0 and window< Tk:
             start= max(0,Tk-(window+1))
-            k=[:,:,start:,:]
-            v=[:,:,start:,:]
+            k=k[:,:,start:,:]
+            v=v[:,:,start:,:]
 
         return F.scaled_dot_product_attention(q,k,v,is_causal=False,enable_gqa=enable_gqa)
 
@@ -88,3 +90,51 @@ def _sdpa_attention(q,k,v,window_size, enable_gqa):
 
 
 
+
+def flash_attn_func(q,k,v,causal=False,window_size=(-1,-1)):
+    if _Use_FA3:
+        return _fa3.flash_attn_func(q,k,v,causal=causal,window_size=window_size)
+
+    q=q.transpose(1,2)
+    k=k.transpose(1,2)
+    v=v.transpose(1,2)
+    enable_gqa=q.size(1) != k.size(1)
+
+    y= _sdpa_attention(q,k,v,window_size, enable_gqa)
+
+    return y.transpose(1,2)
+
+
+def flash_attn_with_kvcache(q,k_cache,v_cache,k=None,v=None,cache_seqlens=None,causal=False,window_size=(-1,-1)):
+    if _Use_FA3:
+        return _fa3.flash_attn_with_kvcache(q,k_cache,v_cache,k=k,v=v,cache_seqlens=cache_seqlens,causal=causal,window_size=window_size)
+
+
+    B,T_new,H,D=q.shape
+    pos=cache_seqlens[0].item()
+
+    if k is not None and v is not None:
+        k_cache[:,pos:pos+T_new,:,:] = k
+        v_cache[:,pos:pos+T_new,:,:] = v
+
+    end=pos+T_new
+
+    k_full= k_cache[:,:end,:,:]
+    v_full= v_cache[:,:end,:,:]
+
+    q_sdpa=q.transpose(1,2)
+    k_sdpa=k_full.transpose(1,2)
+    v_sdpa=v_full.transpose(1,2)
+
+    enable_gqa= q_sdpa.size(1)!=k_sdpa.size(1)
+    y_sdpa= _sdpa_attention(q_sdpa,k_sdpa,v_sdpa,window_size,enable_gqa)
+
+    return y_sdpa.transpose(1,2)
+
+
+from types import SimpleNamespace
+
+flash_attn = SimpleNamespace(
+    flash_attn_func=flash_attn_func,
+    flash_attn_with_kvcache=flash_attn_with_kvcache,
+)
