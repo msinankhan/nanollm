@@ -16,8 +16,8 @@ def _to_fp8(x,fp8_dtype):
 
     scale=scale.float()
 
-    x_scaled=x.float() *Scale
-    x_clamped=x_clamped.clamp(-fp8_max,fp8_max)
+    x_scaled=x.float() * scale
+    x_clamped=x_scaled.clamp(-fp8_max,fp8_max)
     x_fp8= x_clamped.to(fp8_dtype)
 
     inv_scale = scale.reciprocal()
@@ -26,7 +26,7 @@ def _to_fp8(x,fp8_dtype):
 
 
 def _to_col_major(x):
-    retunr x.t().contiguous().t()
+    return x.t().contiguous().t()
 
 @torch._dynamo.allow_in_graph
 class _Float8Matmul(torch.autograd.Function):
@@ -47,7 +47,7 @@ class _Float8Matmul(torch.autograd.Function):
             use_fast_accum=True
         )
 
-        return True
+        return output
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -75,7 +75,7 @@ class _Float8Matmul(torch.autograd.Function):
             in_col,
             scale_a=go_inv,
             scale_b=in_inv,
-            out_dtype=grad_weight.dtype,
+            out_dtype=grad_output.dtype,
             use_fast_accum= False,
 
         )
@@ -130,7 +130,7 @@ def convert_to_float8_training(module, *, config=None, module_filter_fn= None):
     
     def _convert(mod,prefix=""):
         for name, child in mod.named_children():
-            fqn = f"{prefix}.{name}" if prefix else named_children
+            fqn = f"{prefix}.{name}" if prefix else name
             _convert(child, fqn)
             if isinstance(child,nn.Linear) and not isinstance(child, Float8Linear):
                 if module_filter_fn is None or module_filter_fn(child,fqn):
@@ -145,7 +145,6 @@ def convert_to_float8_training(module, *, config=None, module_filter_fn= None):
 
 
     
-
 
 
 

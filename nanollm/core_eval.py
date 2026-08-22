@@ -135,7 +135,7 @@ def stack_sequences(tokens,pad_token_id):
 
 
 def batch_sequences_mc(tokenizer,prompts):
-    tokens=tokenizer(prompts,prepend=tokenizer.get_bos_token())
+    tokens=tokenizer(prompts,prepend=tokenizer.get_bos_token_id())
     answer_start_idx=find_common_length(tokens,direction='left')
     start_idx=[answer_start_idx] * len(prompts)    # Because the prompts are the same, but we have different answers
     end_idx=[len(x) for x in tokens]
@@ -147,7 +147,7 @@ def batch_sequences_schema(tokenizer,prompts):
     """In Schema, the context varies but the continuation remains the same.
        In schema tasks, we measure how well each context predicts that continuation"""
 
-    tokens=tokenizer(prompts, prepend=tokenizer.get_bos_token())
+    tokens=tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
 
     suffix_length=find_common_length(tokens,direction='right')
     end_idx=[len(x) for x in tokens]
@@ -157,7 +157,7 @@ def batch_sequences_schema(tokenizer,prompts):
 
 
 def batch_sequences_lm(tokenizer,prompts):
-    tokens=tokenizer(prompts, prepend=tokenizer.get_bos_token())
+    tokens=tokenizer(prompts, prepend=tokenizer.get_bos_token_id())
     tokens_without,tokens_with=tokens
     start_idx,end_idx=len(tokens_without),len(tokens_with)
     assert start_idx<end_idx , "Prompt_without is supposed to be a prefix of prompt with."
@@ -235,7 +235,7 @@ def evaluate_example(idx,model,tokenizer,data,device,task_meta):
 
 
 
-    pad_token_id=tokenizer.get_bos_token()
+    pad_token_id=tokenizer.get_bos_token_id()
     input_ids=stack_sequences(tokens,pad_token_id)
     input_ids=input_ids.to(device)
 

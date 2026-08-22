@@ -45,7 +45,7 @@ def _load_flash_attention_3():
 
 _fa3 = _load_flash_attention_3()
 HAS_FA3 = _fa3 is not None
-if HAS_FA3 is not None:
+if HAS_FA3:
     print0(" HAS_FA3: True")
 else:
     print0(" HAS_FA3: False")
@@ -61,7 +61,6 @@ def _resolve_use_fa3():
         return False
     if HAS_FA3:
         # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
-        from nanochat.common import COMPUTE_DTYPE
         if COMPUTE_DTYPE == torch.bfloat16:
             return True
         return False
@@ -127,13 +126,13 @@ ddp,ddp_rank,ddp_local_rank,ddp_world_size,device=compute_init(device_type)
 master_process=ddp_rank==0
 
 # autocast_ctx= torch.amp.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=="cuda" else nullcontext()
-synchronize= torch.cuda.synchronize if device=="cuda" else lambda:None #This blocks CPU until GPU finishes all queued work. 
+synchronize= torch.cuda.synchronize if device_type=="cuda" else lambda:None #This blocks CPU until GPU finishes all queued work.
                                                                        # This helps us in measuring accurately the GPU compute time. 
                                                                        #Eg., when loss.backward() is called, the CPU queues the kernel launch 
                                                                        #and GPU executes it later CPU moves ahead. 
                                                                        #When we call time.time() we are measuing the CPU time, 
                                                                        #unless we block CPU until GPU finishes all the queued work with cuda.synchronize()
-get_max_memory= torch.cuda.max_memory_allocated if device=="cuda" else lambda:0
+get_max_memory= torch.cuda.max_memory_allocated if device_type=="cuda" else lambda:0
 
 
 if device_type =="cuda":
@@ -232,7 +231,7 @@ if resuming:
 
 
 if args.fp8:
-    if device != "cuda":
+    if device_type != "cuda":
         print0(f"fp8 requires CUDA, ignoring --fp8 flag.")
     else:
         from nanollm.fp8 import Float8LinearConfig, convert_to_float8_training
@@ -280,7 +279,7 @@ def disable_fp8(model):
 
 
     for parent, attr_name,fp8_module in fp8_locations:
-        linear=Linear(                                   # Regular linear layer with same:
+        linear=nn.Linear(                                # Regular linear layer with same:
             fp8_module.in_features,                         # input dim
             fp8_module.out_features,                        # output dim
             bias=fp8_module.bias is not None,               

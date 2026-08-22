@@ -453,7 +453,7 @@ class GPT(nn.Module):
 
             if top_k is not None and top_k>0:
                 v,_=torch.topk(logits, min(top_k,logits.size(-1)))
-                logits[logits[:,[-1]]]=-float('inf') # We are setting the logits of all the tokens beyong the kth largest logit to -inf to make sure they will not be sampled at all.
+                logits[logits < v[:, [-1]]] = -float('inf') # We are setting the logits of all the tokens beyond the kth largest logit to -inf to make sure they will not be sampled at all.
 
             if temperature>0:
                 logits=logits/temperature #Dividing by temperature scales entropy.
@@ -463,9 +463,8 @@ class GPT(nn.Module):
                 next_id=torch.argmax(logits,dim=-1,keepdim=True) 
 
             ids=torch.cat((ids,next_id),dim=1) 
-            token=next_ids.item()
+            token=next_id.item()
             yield token
 
 
             
-

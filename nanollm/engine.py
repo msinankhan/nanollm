@@ -5,7 +5,7 @@ import warnings
 
 from contextlib import contextmanager
 from collections import deque
-from nanollm.commons import compute_init, autodetect_device_type
+from nanollm.commons import compute_init, autodetect_device_type, COMPUTE_DTYPE
 from nanollm.checkpoint_manager import load_model
 from contextlib import nullcontext
 
@@ -101,7 +101,7 @@ class KVCache:
         """Copies KV from another cache into this one.
         Will be used when we want to generate multiple samples in parallel. """
         assert self.get_pos()==0, f"Cannot fill a non-empty cache"
-        assert self.n_layers==other.n_layers and self.n_heads==other.n_heads and self.head_dim==self.head_dim
+        assert self.n_layers==other.n_layers and self.n_heads==other.n_heads and self.head_dim==other.head_dim
         assert self.max_seq_len>=other.max_seq_len
 
         other_pos=other.get_pos()
@@ -148,7 +148,7 @@ class RowState:
         self.current_tokens=current_tokens or [] #Stores the entire token sequence so far.
         self.forced_tokens=deque() # Used during tool call, when the engine must override sampling and outputs must be injected verbatim.
         self.in_python_block=False # Helps to identify tokens that belong to a python exp. It is turned to True when the appropriate tag is detected.
-        self.python_expr_token=[] # Raw token IDs inside a python block which will be used to decode and run the code exp.
+        self.python_expr_tokens=[] # Raw token IDs inside a python block which will be used to decode and run the code exp.
         self.completed=False # Helps to identify if a given row is completed.
 
 
@@ -158,12 +158,12 @@ class Engine:
         self.tokenizer=tokenizer # This is needed for tool use. 
          
 
-    @torch.inference_mode
+    @torch.inference_mode()
     def generate(self, tokens,num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
         assert isinstance(tokens,list) and isinstance(tokens[0],int), "Expecting a list of int."
         device=self.model.get_device()
 
-        dtype=torch.bfloat16 if device.type=="cuda" else torch.float32
+        dtype=COMPUTE_DTYPE
         rng=torch.Generator(device=device)
         rng.manual_seed(seed)
 
@@ -174,7 +174,7 @@ class Engine:
         output_start=get_special("<|output_start|>")
         output_end=get_special("<|output_end|>")
         assistant_end=get_special("<|assistant_end|>")
-        bos=self.tokenizer.get_bos_token()
+        bos=self.tokenizer.get_bos_token_id()
 
 
         #We first run the prompt to get the K & V from it and then we try to expand it by the number of rows as it is identical across the rows.
@@ -235,23 +235,23 @@ class Engine:
 
                 if next_token == python_start:
                     state.in_python_block=True
-                    state.python_expr_token=[]
+                    state.python_expr_tokens=[]
                 elif next_token==python_end and state.in_python_block:
                     state.in_python_block=False
-                    if state.python_expr_token:
-                        expr=self.tokenizer.decode(state.python_expr_token)
+                    if state.python_expr_tokens:
+                        expr=self.tokenizer.decode(state.python_expr_tokens)
                         result=use_calculator(expr)
 
                         if result is not None:
-                            result_tokens=self.tokenizer.encode(result)
+                            result_tokens=self.tokenizer.encode(str(result))
                             state.forced_tokens.append(output_start)
-                            state.forced_tokens.append(result_tokens)
+                            state.forced_tokens.extend(result_tokens)
                             state.forced_tokens.append(output_end)
 
-                    state.python_expr_token=[]
+                    state.python_expr_tokens=[]
 
                 elif state.in_python_block:
-                    state.python_expr_token.append(next_token)
+                    state.python_expr_tokens.append(next_token)
 
 
             yield token_column, token_masks
@@ -264,7 +264,7 @@ class Engine:
 
     def generate_batch(self,tokens,num_samples=1,**kwargs):
         assistant_end=self.tokenizer.encode_special("<|assistant_end|>")
-        bos=self.tokenizer.get_bos_token()
+        bos=self.tokenizer.get_bos_token_id()
         results=[tokens.copy() for _ in range(num_samples)]
         masks=[[0]*len(tokens) for _ in range(num_samples)] #Copy the same prompt across all rows (num_samples).
 
@@ -286,65 +286,62 @@ class Engine:
         return results, masks
     
 
-    if __name__=="__main__":
+if __name__=="__main__":
 
-        import time
-        device_type=autodetect_device_type()
-        ddp,ddp_rank,ddp_local_rank,ddp_world_size,device=compute_init(device_type)
-        # autocast_ctx=torch.amp.autocast(device_type=device_type,dtype=torch.bfloat16) if device_type=="cuda" else nullcontext()
+    import time
+    device_type=autodetect_device_type()
+    ddp,ddp_rank,ddp_local_rank,ddp_world_size,device=compute_init(device_type)
 
-        model,tokenizer,meta=load_model("base",device,phase="eval")
-        bos_token_id=tokenizer.bos_token_id()
-        
-        kwargs=dict(max_tokens=64,temperature=0.0)
+    model,tokenizer,meta=load_model("base",device,phase="eval")
+    bos_token_id=tokenizer.get_bos_token_id()
 
-        prompt_tokens=tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
+    kwargs=dict(max_tokens=64,temperature=0.0)
+    prompt_tokens=tokenizer.encode("The chemical formula of water is", prepend=bos_token_id)
 
-        generate_tokens=[]
-        torch.cuda.synchronize()
-        t0=time.time()
-        stream=model.generate(prompt_tokens,**kwargs)
+    synchronize=torch.cuda.synchronize if device_type=="cuda" else lambda:None
 
-        for token in stream:
-            generate_tokens.append(token)
-            chunk=tokenizer.decode([token])
-            print(chunk,end="",flush=True)
+    generated_tokens=[]
+    synchronize()
+    t0=time.time()
+    stream=model.generate(prompt_tokens,**kwargs)
 
-        print()
-        torch.cuda.synchronize()
-        t1=time.time()
+    for token in stream:
+        generated_tokens.append(token)
+        chunk=tokenizer.decode([token])
+        print(chunk,end="",flush=True)
 
-        print(f"Reference time: {t1-t0:.2f}s")
-        reference_ids=generate_tokens
+    print()
+    synchronize()
+    t1=time.time()
 
-        generated_tokens=[]
-        engine= Engine(model,tokenizer)
+    print(f"Reference time: {t1-t0:.2f}s")
+    reference_ids=generated_tokens
 
-        stream=engine.generate(prompt_tokens,num_samples=1,**kwargs)
-        torch.cuda.synchronize()
-        t0=time.time()
+    generated_tokens=[]
+    engine=Engine(model,tokenizer)
 
-        for token_column,token_masks in stream:
-            token=token_column[0]
-            generated_tokens.append(token)
-            chunk=tokenizer.decode([token])
-            print(chunk,end="", flush=True)
+    stream=engine.generate(prompt_tokens,num_samples=1,**kwargs)
+    synchronize()
+    t0=time.time()
 
+    for token_column,token_masks in stream:
+        token=token_column[0]
+        generated_tokens.append(token)
+        chunk=tokenizer.decode([token])
+        print(chunk,end="", flush=True)
 
-        print()
+    print()
+    synchronize()
+    t1=time.time()
+    print(f"Engine time: {t1-t0:.2f}s")
 
-        torch.cuda.synchronize()
-        t1=time.time()
-        print(f"Engine time: {t1-t0:.2f}s")
-
-        for i in range(len(reference_ids)):
-            if reference_ids[i] != generated_tokens[i]:
-                print(f"Mismatch at {i}: {reference_ids[i]} != {generated_tokens[i]}")
-                break
-        print(f"Match: {reference_ids == generated_tokens}")
+    for i in range(min(len(reference_ids),len(generated_tokens))):
+        if reference_ids[i] != generated_tokens[i]:
+            print(f"Mismatch at {i}: {reference_ids[i]} != {generated_tokens[i]}")
+            break
+    print(f"Match: {reference_ids == generated_tokens}")
 
 
 
 
 
-        

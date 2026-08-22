@@ -22,7 +22,7 @@ ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type
 model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag=args.model_tag, step=args.step)
 
 
-bos= tokenizer.get_bos_token()
+bos= tokenizer.get_bos_token_id()
 user_start,user_end= tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
 assistant_start, assistant_end= tokenizer.encode_special("<|assistant_start>|"), tokenizer.encode_special("<|assistant_end|>")
 
@@ -42,7 +42,7 @@ while True:
         user_input = args.prompt
     else:
         try:
-            user_input = input("\nUser: ").split()
+            user_input = input("\nUser: ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\nGoodbye!")
             break
@@ -69,7 +69,7 @@ while True:
     generate_kwargs = {
         "num_samples" : 1,
         "max_tokens" : 256,
-        "temperature" : args.temperatue,
+        "temperature" : args.temperature,
         "top_k" : args.top_k,
     }
 
@@ -91,4 +91,3 @@ while True:
 
     if args.prompt:
         break
-

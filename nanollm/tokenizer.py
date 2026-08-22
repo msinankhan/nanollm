@@ -84,7 +84,7 @@ class RustBPETokenizer:
     def encode_special(self,text):
         return self.enc.encode_single_token(text)
 
-    def get_bos_token(self):
+    def get_bos_token_id(self):
         return self.bos_token_id
     
     def encode(self,text,prepend=None, append=None, num_threads=8):
@@ -111,7 +111,7 @@ class RustBPETokenizer:
                 for ids_row in ids:
                     ids_row.insert(0,prepend_id)
 
-            elif append is not None:
+            if append is not None:
                 for ids_row in ids:
                     ids_row.append(append_id)
 
@@ -150,81 +150,68 @@ class RustBPETokenizer:
             ids.extend(token_ids)
             mask.extend([mask_val]*len(token_ids))
 
+        if conversation["messages"][0]["role"]=="system":
+            conversation=copy.deepcopy(conversation)
+            messages=conversation["messages"]
+            assert messages[1]["role"] =="user", "System message must be followed by a user message"
+            messages[1]["content"]=messages[0]["content"] + "\n\n" + messages[1]["content"]
+            messages=messages[1:]
+        else:
+            messages=conversation["messages"]
 
-            if conversation["messages"][0]["role"]=="system":
-                conversation=copy.deepcopy(conversation)
-                messages=conversation["messages"]
-                assert messages[1]["role"] =="user", "System message must be followed by a user message"
-                messages[1]["content"]=messages[0]["content"] + "\n\n" + messages[1]["content"]
-                messages=messages[1:]
+        assert len(messages) >=1, f"Conversation has less than 1 message: {len(messages)}"
 
-            else:
-                messages=conversation["messages"]
+        bos=self.get_bos_token_id()
+        user_start,user_end=self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
+        assistant_start,assistant_end=self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
+        python_start,python_end=self.encode_special("<|python_start|>"), self.encode_special("<|python_end|>")
+        output_start,output_end=self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
 
+        add_tokens(bos,0)
 
-            assert len(messages) >=1, f"Conversation has less than 1 message: {len(messages)}"
+        for i, message in enumerate(messages):
+            must_be_from="user" if i%2==0 else "assistant"
+            assert message["role"]==must_be_from, f"Message {i} is from {message['role']} but should be from {must_be_from}"
+            content=message["content"]
 
+            if message["role"]=="user":
+                assert isinstance(content,str), f"User messages are simply expected to be strings, but got {type(content)}"
+                add_tokens(user_start,0)
+                value_ids=self.encode(content)
+                add_tokens(value_ids,0)
+                add_tokens(user_end,0)
 
-            bos= self.bos_token_id()
-            user_start,user_end=self.encode_special("<|user_start|>"), self.encode_special("<|user_end|>")
-            assistant_start,assistant_end=self.encode_special("<|assistant_start|>"), self.encode_special("<|assistant_end|>")
-            python_start,python_end=self.encode_special("<|python_start|>"), self.encode_special("<|python_end|>")
-            output_start,output_end=self.encode_special("<|output_start|>"), self.encode_special("<|output_end|>")
+            elif message["role"]=="assistant":
+                add_tokens(assistant_start,0)
 
-            add_tokens(bos,0)
-
-            for i, message in enumerate(messages):
-                must_be_from="user" if i%2==0 else "assistant"
-                assert message["role"]==must_be_from, f"Message {i} must be from {must_be_from} but should be from {message["role"]}"
-
-                content=message["content"]
-                
-
-                if message["role"]=="user":
-                    assert isinstance(content,str), f"User messages are simply expected to be string, but got {type(content)}"
-
-                    add_tokens(user_start,0)
+                if isinstance(content,str):
                     value_ids=self.encode(content)
-                    add_tokens(value_ids,0)
-                    add_tokens(user_end)
+                    add_tokens(value_ids,1)
 
+                elif isinstance(content,list):
+                    for part in content:
+                        value_ids=self.encode(part["text"])
 
-                elif message["role"]=="assistant":
-                    add_tokens(assistant_start,0)
-
-                    if isinstance(content,str):
-                        value_ids=self.encode(content)
-                        add_tokens(value_ids,1)
-
-                    elif isinstance(content,list):
-                        for part in content:
-                            value_ids=self.encode(part["text"])
-
-                            if part["type"]=="text":
-                                add_tokens(value_ids,1)
-                            elif part["type"]=="python":
-                                add_tokens(python_start,1) #Gotta set the mask as 1 for the tokens that the model will train on. 
-                                add_tokens(value_ids,1)
-                                add_tokens(python_end,1)
-
-                            elif part["type"]=="python_end":
-                                add_tokens(output_start,0)
-                                add_tokens(value_ids,0)
-                                add_tokens(output_end,0)
-
-                            else:
-                                raise ValueError(f"Unknown part type passed in the conversation{part["type"]}")
-                            
+                        if part["type"]=="text":
+                            add_tokens(value_ids,1)
+                        elif part["type"]=="python":
+                            add_tokens(python_start,1)
+                            add_tokens(value_ids,1)
+                            add_tokens(python_end,1)
+                        elif part["type"]=="python_output":
+                            add_tokens(output_start,0)
+                            add_tokens(value_ids,0)
+                            add_tokens(output_end,0)
+                        else:
+                            raise ValueError(f"Unknown part type passed in the conversation: {part['type']}")
                 else:
                     raise ValueError(f"Unknown content type: {type(content)}")
-                
-                add_tokens(assistant_end)
 
+                add_tokens(assistant_end,1)
 
-            ids=ids[:max_tokens]
-            mask=mask[:max_tokens]
-
-            return ids,mask
+        ids=ids[:max_tokens]
+        mask=mask[:max_tokens]
+        return ids,mask
         
 
 

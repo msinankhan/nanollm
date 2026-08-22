@@ -31,8 +31,8 @@ def _patch_missing_keys(model_data,model_config):
         log0(f"Patching missing resid_lambdas in model data to 1 .")
 
     if "x0_lambdas" not in model_data:
-        model_data["x0_lambda"] = torch.zeros(n_layer)
-        log0(f"Patching missing x0_lambda in model data to 0.0 .")
+        model_data["x0_lambdas"] = torch.zeros(n_layer)
+        log0(f"Patching missing x0_lambdas in model data to 0.0 .")
 
 def save_checkpoint(checkpoint_dir,step,model_data, optimizer_data, meta_data,rank=0):
 
@@ -118,7 +118,7 @@ def find_largest_model(checkpoint_dir):
 
         if match:
             model_depth=int(match.group(1))
-            candidates.append(model_depth,model_tag)
+            candidates.append((model_depth,model_tag))
 
     if candidates:
         candidates.sort(key=lambda x:x[0], reverse=True)
@@ -155,13 +155,39 @@ def load_model_from_dir(checkpoint_dir, device, phase, model_tag=None, step=None
 def load_model(source,*args,**kwargs):
     model_dir={
         "base":"base_checkpoints",
-        "mid":"mid_checkpoint",
-        "sft":"chatsft_checkpoint",
-        "rl": "chatrl_checkpoint"
+        "mid":"mid_checkpoints",
+        "sft":"chatsft_checkpoints",
+        "rl": "chatrl_checkpoints"
     }[source]
 
     base_dir=get_base_dir()
     checkpoint_dir=os.path.join(base_dir,model_dir)
     return load_model_from_dir(checkpoint_dir,*args,**kwargs)
 
+def load_optimizer_state(source, device,rank, model_tag=None, step=None):
+    model_dir={
+        "base" : "base_checkpoints",
+        "sft" : "chatsft_checkpoints",
+        "rl" : "chatrl_checkpoints"
+    }[source]
+
+    base_dir = get_base_dir()
+
+    checkpoints_dir= os.path.join(base_dir,model_dir)
+
+    if model_tag is None:
+        model_tag=find_largest_model(checkpoints_dir)
+
+    checkpoint_dir=os.path.join(checkpoints_dir,model_tag)
+
+    if step is None:
+        step= find_last_step(checkpoint_dir)
+
+    optimizer_path= os.path.join(checkpoint_dir, f"optim_{step:06d}_rank{rank:d}.pt")
+    if not os.path.exists(optimizer_path):
+        log0(f"Optimizer checkpoint not found: {optimizer_path}")
+        return None
+    log0(f"Loading optimizer state from {optimizer_path}")
+    optimizer_data=torch.load(optimizer_path,map_location=device)
+    return optimizer_data
 

@@ -80,7 +80,7 @@ def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokeni
         tokens=token_buffer[:needed_tokens] # We grab just enough tokens for inputs, targets. 
         token_buffer=token_buffer[B*T:]     # We overlap by 1 token, this extra token belongs to the target
 
-        use_cuda=device=="cuda"
+        use_cuda=torch.device(device).type=="cuda"
 
         scratch=torch.tensor(tokens, dtype=torch.long, pin_memory=use_cuda)
         inputs=scratch[:-1].view(B,T).to(device=device, non_blocking=use_cuda)
@@ -106,7 +106,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     row_capacity=T+1
     doc_buffer=[]
     batches=_document_batches(split,resume_state_dict, tokenizer_batch_size)
-    bos_token=tokenizer.get_bos_token()
+    bos_token=tokenizer.get_bos_token_id()
     pg_idx,rg_idx,epoch=0,0,1
 
     def refill_buffer():
@@ -147,7 +147,7 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
 
             rows.append(row[:row_capacity])
 
-        use_cuda=device=="cuda"
+        use_cuda=torch.device(device).type=="cuda"
 
         batch_tensor=torch.tensor(rows,dtype=torch.long, pin_memory=use_cuda)
         inputs=batch_tensor[:,:-1].to(device=device, non_blocking=use_cuda)

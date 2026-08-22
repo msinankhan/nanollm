@@ -54,8 +54,9 @@ def run_generative_eval(task_object, tokenizer, model, engine, num_samples,max_n
 
     if ddp:
         num_passed_tensor= torch.tensor([num_passed], dtype=torch.long, device=device)
-        total_tensor = torch.tensor([total], autodetect_device_type=torch.long, device=device)
+        total_tensor = torch.tensor([total], dtype=torch.long, device=device)
         dist.all_reduce(num_passed_tensor, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
         num_passed = num_passed_tensor.item()
         total = total_tensor.item()
 
@@ -83,44 +84,42 @@ def run_categorical_eval (task_object, tokenizer, model, batch_size, max_problem
         i0, i1 = i*batch_size, min((i+1)*batch_size, num_problems)
 
         conversations = [task_object[ii] for ii in range(i0,i1)]
-        prompt_ids = [tokenizer.render_for_completion(conversations) for conversation in conversations]
+        prompt_ids = [tokenizer.render_for_completion(conversation) for conversation in conversations]
 
         max_length = max(len(ids) for ids in prompt_ids)
         answer_time_positions = [len(ids) -1 for ids in prompt_ids]
         padded_prompt_ids = [ids + [bos] * (max_length - len(ids)) for ids in prompt_ids]
         prompt_ids = torch.tensor(padded_prompt_ids, dtype=torch.long, device=device)
 
+        with torch.no_grad():
+            logits = model(prompt_ids)
 
-    with torch.no_grad():
-        logits = model(prompt_ids)
+        for idx, conversation in enumerate(conversations):
+            letters = conversation['letters']
+            letter_ids = []
 
+            for letter in letters:
+                if letter not in letter_to_id_cache:
+                    encoded_letter = tokenizer.encode(letter)
+                    assert len(encoded_letter) ==1, "Each letter must be a single token."
+                    letter_to_id_cache[letter] = encoded_letter[0]
 
-    for idx, conversation in enumerate(conversations):
-        letters = conversations['letters']
-        letter_ids = []
+                letter_ids.append(letter_to_id_cache[letter])
 
-        for letter in letters:
-            if not letter in letter_to_id_cache:
-                encoded_letter = tokenizer.encode(letter)
-                assert len(encoded_letter) ==1, "Each letter must be a single token."
-                letter_to_id_cache[letter] = encoded_letter[0]
+            answer_pos = answer_time_positions[idx]
+            focus_logits = logits[idx, answer_pos, letter_ids]
 
-            letter_ids.append(letter_to_id_cache[letter])
+            argmax_letter_id = focus_logits.argmax(dim=-1).item()
+            predicted_letter = letters[argmax_letter_id]
 
-        answer_pos = answer_time_positions[idx]
-        focus_logits = logits [idx, answer_pos, letter_ids]
-
-        argmax_letter_id = focus_logits.argmax(dim=-1).itme()
-        predicted_letter = letters[argmax_letter_id]
-
-        outcome = task_object.evaluate(conversation, predicted_letter)
-        num_passed+=int(outcome)
-        total +=1
+            outcome = task_object.evaluate(conversation, predicted_letter)
+            num_passed+=int(outcome)
+            total +=1
 
 
     if ddp:
         num_passed_tensor = torch.tensor([num_passed], dtype=torch.long, device=device)
-        total_tensor=torch.tensor([total],dtype=torch.loong, device=device)
+        total_tensor=torch.tensor([total],dtype=torch.long, device=device)
         dist.all_reduce(num_passed_tensor, op=dist.ReduceOp.SUM)
         dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
         num_passed=num_passed_tensor.item()

@@ -180,10 +180,10 @@ def compute_init(device_type='cuda'):
         torch.backends.cuda.matmul.fp32_precision='tf32'
 
 
-    is_ddp_requested, ddp_rank,ddp_local_rank,ddp_world_size= get_dist_info()
+    ddp_requested, ddp_rank,ddp_local_rank,ddp_world_size= get_dist_info()
 
-    if is_ddp_initialized and device_type=='cuda':
-        device=torch.device('cuda', ddp_rank) #Initializes as cuda:0, cuda:1, cuda:2 etc
+    if ddp_requested and device_type=='cuda':
+        device=torch.device('cuda', ddp_local_rank) #Initializes as cuda:0, cuda:1, cuda:2 etc
         torch.cuda.set_device(device)
         dist.init_process_group(backend='nccl',device_id=device) #Creates communication channels between processes
         dist.barrier() #This forces all processes to wait until everyone has finished initialization
@@ -195,7 +195,7 @@ def compute_init(device_type='cuda'):
         logger.info(f"Distribute world size: {ddp_world_size}")
 
 
-    return is_ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size, device
+    return ddp_requested, ddp_rank, ddp_local_rank, ddp_world_size, device
 
 
 def compute_cleanup():
