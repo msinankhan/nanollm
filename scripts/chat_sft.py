@@ -88,3 +88,75 @@ if not HAS_FA3:
 model, tokenizer, meta= load_model("base", device, phase = "train", model_tag = args.model_tag, step=args.model_step)
 
 
+pretrain_user_config= meta.get("user_config",{})
+
+for name,fallback,source in[
+    ("max_seq_len",2048,meta),
+    ("device_batch_size", 32, meta),
+    ("total_batch_size", 524288, meta),
+    ("embedding_lr", 0.3, pretrain_user_config),
+    ("unembedding_lr", 0.004, pretrain_user_config),
+    ("matrix_lr", 0.02, pretrain_user_config)
+]:
+    arg_val=getattr(args,name)
+    pretrain_val= source.get(name)
+    if arg_val is None:
+        resolved=pretrain_val if pretrain_val is not None else fallback
+        setattr(args,name,resolved)
+        print0(f"Inherited {name}={resolved} from pretrained checkpoint!")
+    elif pretrain_val is not None and pretrain_val!=arg_val:
+        print0(f"NOTE: --{name.replace('_','-')}={arg_val} overrides pretrained value of {pretrain_val}")
+
+    else:
+        print0(f"Using {name} = {arg_val}")
+
+assert args.device_batch_size >0
+assert args.total_batch_size > 0
+assert args.max_seq_len >0
+
+orig_model = model
+model = torch.compile(model, dynamic=False)
+depth = model.config.n_layer
+number_flops_per_token= model.estimate_flops()
+tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len
+world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size
+
+assert args.total_batch_size % world_tokens_per_fwdbwd == 0, f"Total Batch Size ({args.total_batch_size}) must be a multiple of {world_tokens_per_fwdbwd}"
+
+grad_accum_steps = args.total_batch_size // world_tokens_per_fwdbwd
+
+print0(f"Tokens / micro-batch / rank : {args.device_batch_size} x {args.max_seq_len} = {tokens_per_fwdbwd:,}")
+print0(f"Token / micro-batch : {world_tokens_per_fwdbwd}")
+print0(f"Total batch size {args.total_batch_size:,} => gradient accumulation steps: {grad_accum_steps}")
+token_bytes = get_token_bytes(device=device)
+
+optimizer= model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr, matrix_lr=args.matrix_lr, weight_decay=0.0)
+
+base_dir=get_base_dir()
+
+if args.load_optimizer:
+    optimizer_data=load_optimizer_state("base", device=device, rank=ddp_rank, model_tag= args.model_tag, step=args.model_step)
+    if optimizer_data is not None:
+        base_lrs= [group['lr'] for group in optimizer.param_groups]
+        optimizer.load_state_dict(optimizer_data)
+        del optimizer_data
+        for group, base_lr in zip(optimizer.param_groups,base_lrs):
+            group['lr'] = base_lr
+
+        print0("Loaded optimizer state from pretrained checkpoint (momentum buffers only, LRs reset)")
+
+    else:
+        print0("WARNING: Pptimizer checkpoint not found, starting with fresh optimizer (slightly worse)")
+
+
+scaler = torch.amp.GradScaler() if COMPUTE_DTYPE ==torch.float16 else None # Prevents gradients from going to 0.
+
+if scaler is None:
+    print0("GradScaler enabled for fp16 training.")
+
+for group in optimizer.param_groups:
+    group["lr"]*=args.init_lr_frac
+    group["initial_lr"] = group["lr"]
+
+assert all(group["lr"] > 0 for group in optimizer.param_groups)
+assert all(group["initial_lr"] == group["lr"] for group in optimizer.param_groups)
