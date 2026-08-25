@@ -146,12 +146,12 @@ if args.load_optimizer:
         print0("Loaded optimizer state from pretrained checkpoint (momentum buffers only, LRs reset)")
 
     else:
-        print0("WARNING: Pptimizer checkpoint not found, starting with fresh optimizer (slightly worse)")
+        print0("WARNING: Optimizer checkpoint not found, starting with fresh optimizer (slightly worse)")
 
 
-scaler = torch.amp.GradScaler() if COMPUTE_DTYPE ==torch.float16 else None # Prevents gradients from going to 0.
+scaler = torch.amp.GradScaler() if COMPUTE_DTYPE ==torch.float16 else None # Prevents gradients from going to 0 by scaling loss before back prop to prevent small FP16 gradient values. It unscales it before the optimizer update. 
 
-if scaler is None:
+if scaler is not None:
     print0("GradScaler enabled for fp16 training.")
 
 for group in optimizer.param_groups:
@@ -160,3 +160,198 @@ for group in optimizer.param_groups:
 
 assert all(group["lr"] > 0 for group in optimizer.param_groups)
 assert all(group["initial_lr"] == group["lr"] for group in optimizer.param_groups)
+
+train_tasks=[
+    SmolTalk(split="train"),
+    *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)],
+    *[GSM8K(subset='main', split = "train") for _ in range(args.gsm8k_epochs)],
+]
+
+train_dataset=TaskMixture(train_tasks)
+
+print0(f"Training mixture: {len(train_dataset):,} rows (MMLU x {args.mmlu_epochs}, GSM8K x {args.gsm8k_epochs})")
+
+val_dataset = TaskMixture([
+    SmolTalk(split="test"),
+    MMLU(subset="all", split="test", stop=5200),
+    GSM8K(subset="main", split="test", stop=420),
+])
+
+last_step = False
+approx_progress =0.0
+current_epoch=1
+
+
+def sft_data_generator_bos_bestfit(split, buffer_size=100):
+    global last_step, approx_progress, current_epoch
+
+    assert split in {"train", "val"}, "split must be 'train' or 'val'."
+    dataset=train_dataset if split == "train" else val_dataset
+
+    dataset_size= len(dataset)
+    assert dataset_size > 0
+
+    row_capacity = args.max_seq_len +1
+
+    bos_token=tokenizer.get_bos_token_id()
+
+    conv_buffer =[]
+    cursor = ddp_rank
+    consumed = ddp_rank
+    epoch =1
+    it =0 # iteration counter
+
+    def refill_buffer():
+        nonlocal cursor, epoch
+        while len(conv_buffer) < buffer_size:
+            conversation = dataset[cursor]
+            ids, mask = tokenizer.render_conversation(conversation, max_tokens=row_capacity)
+            conv_buffer.append((ids,mask))
+            cursor+=ddp_world_size
+            if cursor>=dataset_size:
+                cursor = cursor % dataset_size
+                epoch+=1
+
+    while True:
+        rows=[]
+        masked_rows=[]
+        row_lengths=[]
+
+        for _ in range(args.device_batch_size):
+            row=[]
+            mask=[]
+            padded=False
+
+
+            while len(row) < row_capacity:
+                while len(conv_buffer)< buffer_size:
+                    refill_buffer()
+
+                remaining = row_capacity - len(row)
+
+                best_idx=-1
+                best_len=0
+
+                for i, (conv_tok, _) in enumerate(conv_buffer):
+
+                    if len(conv_tok) <= remaining and len(conv_tok) > best_len:
+                        best_len= len(conv_tok)
+                        best_idx = i
+
+                if best_idx>=0:
+                    conv_tok, conv_mask= conv_buffer.pop(best_idx)
+                    row.extend(conv_tok)
+                    mask.extend(conv_mask)
+                    consumed+=ddp_world_size
+
+                else:
+                    content_len= len(row)
+                    row.extend([bos_token]*remaining)
+                    mask.extend([0]* remaining)
+                    padded = True
+                    break
+
+
+            if padded:
+                row_lengths.append(content_len)
+            else:
+                row_lengths.append(row_capacity)
+
+            rows.append(row[:row_capacity])
+            masked_rows.append(mask[:row_capacity])
+
+
+        it +=1
+        if 0 < args.num_iterations <=it and split=="train":
+            last_step = True
+
+        if split == "train": 
+            current_epoch =epoch
+            if args.num_iterations >0:
+                approx_progress = it / args.num_iterations
+
+            else:
+                approx_progress = consumed/dataset_size
+
+            if consumed >= dataset_size:
+                last_step = True
+
+
+
+        use_cuda = device_type == "cuda"
+        batch_tensor = torch.tensor(rows, dtype=torch.long, pin_memory=use_cuda)
+
+        inputs = batch_tensor[:,:-1].to(device=device, dtype = torch.int32, non_blocking=use_cuda).contiguous()
+        targets = batch_tensor[:,1:].to(device=device, dtype = torch.int64, non_blocking=use_cuda).contiguous()
+
+
+        mask_tensor=torch.tensor(masked_rows, dtype=torch.int8)
+        mask_targets = mask_tensor[:,1:].to(device=device)
+
+        targets[mask_targets==0] =-1
+
+        for i,content_len in enumerate(row_lengths):
+            if content_len<row_capacity:
+                targets[i,content_len-1:] = -1
+
+        yield inputs, targets
+
+
+train_loader = sft_data_generator_bos_bestfit("train")
+build_val_loader = lambda: sft_data_generator_bos_bestfit("val")
+progress =0
+
+
+def get_lr_multiplier(progress):
+    progress = min(max(progress, 0.0), 1.0)
+    if progress<args.warmup_ratio:
+        return (progress + 1e-8) / args.warmup_ratio
+    elif progress <=1.0 - args.warmdown_ratio:
+        return 1.0
+    else: 
+        decay = (progress -(1.0 - args.warmdown_ratio))/ args.warmdown_ratio
+        return (1-decay) * 1.0+ decay * args.final_lr_frac
+
+
+def get_muon_momentum(it):
+    frac = min(it/300,1)
+    momentum= (1-frac) * 0.85 + frac *0.95
+    return momentum
+
+
+x,y=next(train_loader)
+min_val_bpb = float('inf')
+smooth_train_loss=0.0
+ema_beta= 0.9
+total_training_time = 0
+step=0
+
+
+while True:
+    flops_so_far = number_flops_per_token * args.total_batch_size * step
+
+    if ddp:
+        last_step_tensor = torch.tensor(last_step,dtype=torch.int32, device=device)
+        dist.all_reduce(last_step_tensor,op=dist.ReduceOp.MAX)
+        last_step=bool(last_step_tensor.item())
+
+
+    if last_step or (args.eval_every >0 and step % args.eval_every == 0):
+        model.eval()
+        val_loader=build_val_loader()
+        eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
+        val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+
+        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+
+        if val_bpb < min_val_bpb:
+            min_val_bpb = val_bpb
+
+        wandb_run.log({
+            "step" : step,
+            "total_training_flops":flops_so_far,
+            "total_training_time" : total_training_time,
+            "val/bpb": val_bpb,
+        })
+
+        model.train()
