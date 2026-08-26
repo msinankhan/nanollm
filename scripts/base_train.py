@@ -513,7 +513,7 @@ if resuming:
 
 
 dataloader_resume_state_dict= None if not resuming else meta_data["dataloader_state_dict"]
-train_loader= tokenizing_distributed_data_loader_with_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split='train', device=device, resume_state_dict=dataloader_resume_state_dict)
+train_loader= tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split='train', device=device, resume_state_dict=dataloader_resume_state_dict)
 build_val_loader = lambda : tokenizing_distributed_data_loader_with_bos_bestfit(tokenizer, args.device_batch_size,args.max_seq_len, split="val", device=device)
 x,y, dataloader_state_dict= next(train_loader)
 
@@ -769,7 +769,7 @@ while True:
     else:
         eta_str=""
 
-    epoch= f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pg_idx']} rg: {dataloader_state_dict['rg_idx']}"
+    epoch= f"{dataloader_state_dict['epoch']} pq: {dataloader_state_dict['pq_idx']} rg: {dataloader_state_dict['rg_idx']}"
     print0(f"step {step:05d}/{num_iterations:05d} ({pct_done:.2f}%) | loss: {debiased_smooth_loss:.6f} | lrm:{lrm:.2f} | dt:{dt*1000:.2f}ms | tok/sec: {token_per_sec:,} | bf15_mfu: {mfu:.2f} | epoch: {epoch} | total_time: {total_training_time/60:.2f}m{eta_str}")
 
     if step %100 ==0:

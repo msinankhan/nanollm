@@ -2,7 +2,7 @@ import math
 import torch
 import torch.distributed as dist
 
-@torch.no_grad
+@torch.no_grad()
 def evaluate_bpb(model,batches,steps,token_bytes):
 
     """Computes bits per bytes instead of average loss which helps us compare models across varying vocab_size.
@@ -17,7 +17,7 @@ def evaluate_bpb(model,batches,steps,token_bytes):
 
     batch_iter=iter(batches)
     for _ in range(steps):
-        x,y, _=next(batch_iter)
+        x,y =next(batch_iter)
         loss2D=model(x,y,loss_reduction='none') #(B,T)
         loss2D=loss2D.view(-1) #(B*T)
         y=y.view(-1) # Flatten

@@ -14,8 +14,8 @@ def _document_batches(split,resume_state_dict, tokenizer_batch_size):
 
     parquet_paths=parquet_paths[:-1] if split=="train" else parquet_paths[-1:]
 
-    resume_pq_idx=resume_state_dict["resume_pq_idx"] if resume_state_dict is not None else 0
-    resume_rg_idx=resume_state_dict["resume_rg_idx"] if resume_state_dict is not None else None 
+    resume_pq_idx=resume_state_dict["pq_idx"] if resume_state_dict is not None else 0
+    resume_rg_idx=resume_state_dict["rg_idx"] if resume_state_dict is not None else None
     resume_epoch=resume_state_dict.get("epoch", 1) if resume_state_dict else 1
 
     first_pass=True # This is to accomodate special handling on Startup/resume. After that, we loop normally. 
@@ -35,7 +35,7 @@ def _document_batches(split,resume_state_dict, tokenizer_batch_size):
                 base_idx=resume_rg_idx//ddp_world_size +1
                 rg_idx=base_idx*ddp_world_size+ddp_rank
 
-                if rg_idx>pf.num_row_groups:
+                if rg_idx>=pf.num_row_groups:
                     pq_idx+=1
                     continue
                 resume_rg_idx=None
@@ -50,7 +50,7 @@ def _document_batches(split,resume_state_dict, tokenizer_batch_size):
                 for i in range(0,len(batch),tokenizer_batch_size):
                     yield batch[i:i+tokenizer_batch_size], (pq_idx,rg_idx, epoch)
 
-                rg_idx+=1
+                rg_idx+=ddp_world_size
             pq_idx+=1
 
         first_pass=False
@@ -64,12 +64,12 @@ def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokeni
     needed_tokens=B*T+1
     bos_token=tokenizer.get_bos_token_id()
     token_buffer=[]
-    pg_idx,rg_idx, epoch=0,0,1
+    pq_idx,rg_idx, epoch=0,0,1
 
     while True:
 
         while len(token_buffer)< needed_tokens:
-            doc_batch,(pg_idx,rg_idx,epoch) = next(batches)
+            doc_batch,(pq_idx,rg_idx,epoch) = next(batches)
             tokens_list=tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads )
 
             for tokens in tokens_list:
@@ -86,7 +86,7 @@ def tokenizing_distributed_data_loader_with_state(tokenizer, B, T, split, tokeni
         inputs=scratch[:-1].view(B,T).to(device=device, non_blocking=use_cuda)
         targets=scratch[1:].view(B,T).to(device=device,non_blocking=use_cuda)
 
-        yield inputs,targets, {"pg_idx":pg_idx, "rg_idx":rg_idx, "epoch":epoch}
+        yield inputs,targets, {"pq_idx":pq_idx, "rg_idx":rg_idx, "epoch":epoch}
 
 
 def tokenizing_distributed_data_loader(*args,**kwargs):
@@ -107,11 +107,11 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
     doc_buffer=[]
     batches=_document_batches(split,resume_state_dict, tokenizer_batch_size)
     bos_token=tokenizer.get_bos_token_id()
-    pg_idx,rg_idx,epoch=0,0,1
+    pq_idx,rg_idx,epoch=0,0,1
 
     def refill_buffer():
-        nonlocal pg_idx,rg_idx,epoch
-        doc_batch, (pg_idx,rg_idx,epoch)= next(batches)
+        nonlocal pq_idx,rg_idx,epoch
+        doc_batch, (pq_idx,rg_idx,epoch)= next(batches)
         token_lists=tokenizer.encode(doc_batch, prepend=bos_token, num_threads=tokenizer_threads)
         for tokens in token_lists:
             doc_buffer.append(tokens)
@@ -153,9 +153,10 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
         inputs=batch_tensor[:,:-1].to(device=device, non_blocking=use_cuda)
         targets=batch_tensor[:,1:].to(device=device, non_blocking=use_cuda) #TODO:cpu_buffer, gpu_buffer.
 
-        yield inputs, targets, {"pg_idx":pg_idx, "rg_idx":rg_idx, "epoch":epoch}
+        yield inputs, targets, {"pq_idx":pq_idx, "rg_idx":rg_idx, "epoch":epoch}
 
 
 def tokenizing_distributed_data_loader_with_bos_bestfit(*args,**kwargs):
+    """Helper function that omits the state dictionary from yielded batches."""
     for inputs, targets, state_dict in tokenizing_distributed_data_loader_with_state_bos_bestfit(*args,**kwargs):
-        yield inputs, targets , state_dict
+        yield inputs, targets

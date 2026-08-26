@@ -355,3 +355,116 @@ while True:
         })
 
         model.train()
+
+    # chatcore_results={}
+
+    if args.chatcore_every >0 and (last_step or (step>0 and step % args.chatcore_every==0)):
+        model.eval()
+        engine= Engine(orig_model,tokenizer)
+
+        all_tasks= ['ARC-Easy', 'ARC-Challenge', 'MMLU', 'GSM8K', 'HumanEval']
+        categorical_tasks= {'ARC-Easy', 'ARC-Challenge', 'MMLU'}
+        baseline_accuracies= {
+            'ARC-Easy': 0.25, 'ARC-Challenge': 0.25, 'MMLU':0.25,
+            'GSM8K':0.0, 'HumanEval':0.0,
+        }
+        task_results={}
+
+        for task_name in all_tasks:
+            limit = args.chatcore_max_cat if task_name in categorical_tasks else args.chatcore_max_sample
+
+            max_problems = None if limit < 0 else limit
+
+            acc = run_chat_eval(task_name, orig_model, tokenizer, engine, batch_size=args.device_batch_size,max_problems=max_problems)
+            task_results[task_name] =acc
+            print0(f"  {task_name} : {100*acc:.2f}%")
+
+        def centered_mean(tasks):
+            return sum((task_results[t] - baseline_accuracies[t])/(1.0 - baseline_accuracies[t]) for t in tasks) / len(tasks)
+
+        chatcore=centered_mean(all_tasks)
+        chatcore_cat = centered_mean(categorical_tasks)
+        print0(f"Step {step:05d} | ChatCORE: {chatcore:.4f} | ChatCORE_cat: {chatcore_cat:.4f}")
+        wandb_run.log({
+                        "step" : step,
+                        "total_training_flops": flops_so_far,
+                        "chatcore_metric" : chatcore,
+                        "chatcore_cat" : chatcore_cat,
+                        **{f"chatcore/{task_name}": acc for task_name, acc in task_results.items()},
+                        })
+        model.train()      
+
+
+    if last_step:
+        output_dirname = args.model_tag if args.model_tag else f"d{depth}"
+        checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
+
+        save_checkpoint(
+            checkpoint_dir,
+            step,
+            orig_model.state_dict(),
+            optimizer.state_dict(),
+            {
+                "step":step,
+                "val_bpb": val_bpb,
+                "model_config" : {
+                    "sequence_len" : args.max_seq_len,
+                    "vocab_size" : tokenizer.get_vocab_size(),
+                    "n_layer" : depth,
+                    "n_head" : model.config.n_head,
+                    "n_kv_head" : model.config.n_kv_head,
+                    "n_embed" : model.config.n_embed,
+                    "window_pattern" : model.config.window_pattern,
+                },
+                "user_config" : user_config,
+
+            },
+            rank=ddp_rank,
+        )                 
+
+    if last_step:
+        break     
+
+    synchronize()
+    t0=time.time()
+
+    for micro_step in range(grad_accum_steps):
+        loss = model(x,y)
+        train_loss=loss.detach()
+        loss = loss/grad_accum_steps
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
+
+        x,y = next(train_loader)
+        progress = max(progress, approx_progress)
+
+
+    lrm= get_lr_multiplier(progress)
+    muon_momentum=get_muon_momentum(step)
+
+    for group in optimizer.param_groups:
+        group['lr'] = group['initial_lr'] *lrm
+
+        if group['kind'] == 'muon':
+            group['momentum'] = muon_momentum
+
+
+    if scaler is not None:
+        scaler.unscale_(optimizer)
+
+        if is_ddp_initialized():
+            for v in scaler._found_inf_per_device(optimizer).values():
+                dist.all_reduce(v,op=dist.ReduceOp.MAX)
+
+        scaler.step(optimizer)
+        scaler.update()
+
+    else:
+        optimizer.step()
+
+    model.zero_grad(set_to_none=True)
+    synchronize()
+    t1=time.time()
+    dt=t1-t0
