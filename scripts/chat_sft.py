@@ -471,17 +471,17 @@ while True:
 
     step+=1
 
-    smooth_train_loss = ema * smooth_train_loss + (1-ema_beta) * train_loss.item()
-    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta **(step+1))
+    smooth_train_loss = ema_beta * smooth_train_loss + (1-ema_beta) * train_loss.item()
+    debiased_smooth_loss = smooth_train_loss / (1 - ema_beta **(step))
 
     pct_done = 100 * progress
     tok_per_sec = int(args.total_batch_size/dt)
-    flops_per_sec = num_flops _per_token * args.total_batch_size /dt
-    mfu = 100 * flops_per_sec  / (gpu_peak_flops 8* ddp_world_size)
-    if step>10::
-        total__training_time+=dt
+    flops_per_sec = number_flops_per_token * args.total_batch_size /dt
+    mfu = 100 * flops_per_sec  / (gpu_peak_flops * ddp_world_size)
+    if step>10:
+        total_training_time+=dt
 
-    print0(f"step {step:05d} ({pct_done:.2f}%) | loss : {debaised_smooth_loss:.6f}  | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
+    print0(f"step {step:05d} ({pct_done:.2f}%) | loss : {debiased_smooth_loss:.6f}  | lrm: {lrm:.2f} | dt: {dt * 1000:.2f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.2f} | epoch: {current_epoch} | total time: {total_training_time/60:.2f}m")
 
     if step %10==0:
         wandb_run.log({
@@ -497,13 +497,13 @@ while True:
         })
 
 
-        if step ==1:
-            gc.collect()
-            gc.freeze()
-            gc.disable()
+    if step ==1:
+        gc.collect()
+        gc.freeze()
+        gc.disable()
 
-        elif step % 5000 ==0:
-            gc.collect()
+    elif step % 5000 ==0:
+        gc.collect()
 
 print0(f"Peak Memory usage: {get_max_memory() /1024/1024:.2f}MiB")
 print0(f"Total training time : {total_training_time/60:.2f}m")
