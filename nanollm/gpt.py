@@ -292,6 +292,48 @@ class GPT(nn.Module):
 
     def get_device(self):
         return self.transformer.wte.weight.device
+
+
+    def num_matmul_params(self):
+        return sum(
+            module.weight.numel()
+            for module in self.modules()
+            if isinstance(module, Linear)
+        )
+
+    def estimate_decode_flops(self,context_len):
+        h = self.config.n_head
+        q=self.config.n_embed // self.config.n_head
+
+        attn_flops = sum( 4 * h * q * min(context_len, window) for window, _ in self.window_sizes)
+        decode_flops = 2 * self.num_matmul_params() + attn_flops
+        return decode_flops
+
+    def estimate_prefill_flops(self, num_tokens):
+        h = self.config.n_head
+        q=self.config.n_embed //self.config.n_head
+        attn_flops =0
+        for window, _ in self.window_sizes:
+            w = min(window, num_tokens)
+            attended_tokens = w * (w+1) // 2 + (num_tokens - w) * w
+            attn_flops += 4 * h * q * attended_tokens
+        prefill_flops = 2 * self.num_matmul_params() * num_tokens + attn_flops
+        return prefill_flops
+
+    def kv_bytes_per_token(self):
+        head_dim = self.config.n_embed // self.config.n_head
+        kv_dtype_bytes = COMPUTE_DTYPE.itemsize
+        return self.config.n_layer * 2 * self.config.n_kv_head * head_dim * kv_dtype_bytes
+
+
+    def kv_read_bytes(self, context_len):
+        head_dim = self.config.n_embed //self.config.n_head
+        kv_dtype_bytes = COMPUTE_DTYPE.itemsize
+        total =0
+        for window, _ in self.window_sizes:
+            total +=2 * self.config.n_kv_head * head_dim * kv_dtype_bytes * min(context_len, window)
+
+        return total
     
 
     def estimate_flops(self):

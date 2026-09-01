@@ -237,93 +237,87 @@ for step in range(num_steps):
             **log_passk
         })
 
-        rewards_list =[]
-        sequence_lengths =[]
+    rewards_list = []
+    sequence_lengths = []
 
-        for example_step in range(examples_per_rank):
-            sequences_all , inputs_all, targets_all, rewards_all, advantages_all = next(batch_iterator)
+    for example_step in range(examples_per_rank):
+        sequences_all, inputs_all, targets_all, rewards_all, advantages_all = next(batch_iterator)
 
-            model.train()
+        model.train()
 
-            assert inputs_all.size(0) % args.device_batch_size == 0
+        num_sequences = inputs_all.size(0)
+        assert num_sequences == args.num_samples
+        num_passes = (num_sequences + args.device_batch_size - 1) // args.device_batch_size
 
-            num_passes = inputs_all.size(0) // args.device_batch_size
-            for pass_idx in range(num_passes):
-                b0,b1 = pass_idx * args.device_batch_size, (pass_idx + 1) * args.device_batch_size
-                inputs=inputs_all[b0:b1]
-                targets= targets_all[b0:b1]
-                rewards = rewards_all[b0:b1]
-                advantages = advantages_all[b0:b1]
+        for pass_idx in range(num_passes):
+            b0 = pass_idx * args.device_batch_size
+            b1 = min((pass_idx + 1) * args.device_batch_size, num_sequences)
+            inputs = inputs_all[b0:b1]
+            targets = targets_all[b0:b1]
+            rewards = rewards_all[b0:b1]
+            advantages = advantages_all[b0:b1]
 
-                logp = -model(inputs, targets, loss_reduction='none').view_as(inputs)
+            logp = -model(inputs, targets, loss_reduction="none").view_as(inputs)
+            pg_obj = (logp * advantages.unsqueeze(-1)).sum()
 
-                pg_obj = (logp * advantages.unsqueeze(-1)).sum()
+            num_valid = (targets >= 0).sum().clamp(min=1)
+            pg_obj = pg_obj / (num_valid * num_passes * examples_per_rank)
 
-                num_valid = (targets >=0).sum().clamp(min=1)
-                pg_obj = pg_obj / (num_valid * num_passes * examples_per_rank)
+            loss = -pg_obj
+            loss.backward()
+            print0(f"Step {step}/{num_steps} | Example step {example_step} | Pass {pass_idx} | loss: {loss.item():.6f} | Average reward: {rewards.mean().item()}")
 
-                loss = -pg_obj
-                loss.backward()
-                print0(f"Step {step}/{num_steps} | Example step {example_step} | Pass {pass_idx} | loss: {loss.item():.6f} | Average reward: {rewards.mean().item()}")
+        rewards_list.append(rewards_all.mean().item())
+        sequence_lengths.extend(len(seq) for seq in sequences_all)
 
-            rewards_list.append(rewards_all.mean().item())
-            sequence_lengths.extend(len(seq) for seq in sequences_all)
+    mean_reward = sum(rewards_list) / len(rewards_list)
+    mean_sequence_length = sum(sequence_lengths) / len(sequence_lengths)
 
-        mean_reward = sum(rewards_list) / len(rewards_list)
-        mean_sequence_length = sum(sequence_lengths) / len(sequence_lengths)
+    if ddp:
+        mean_reward_tensor = torch.tensor(mean_reward, dtype=torch.float, device=device)
+        mean_sequence_length_tensor = torch.tensor(mean_sequence_length, dtype=torch.float, device=device)
+        dist.all_reduce(mean_reward_tensor, op=dist.ReduceOp.AVG)
+        dist.all_reduce(mean_sequence_length_tensor, op=dist.ReduceOp.AVG)
+        mean_reward = mean_reward_tensor.item()
+        mean_sequence_length = mean_sequence_length_tensor.item()
 
-        if ddp:
-            mean_reward_tensor = torch.tensor(mean_reward, dtype=torch.float, device=device)
-            mean_sequence_length_tensor = torch.tensor(mean_sequence_length, dtype = torch.float, device=device)
-            dist.all_reduce(mean_reward_tensor, op=dist.ReduceOp.AVG)
-            dist.all_reduce(mean_sequence_length, op=dist.ReduceOp.AVG)
-            mean_reward = mean_reward_tensor.item()
-            mean_sequence_length = mean_sequence_length_tensor.item()
+    print0(f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}")
 
-        print0(f"Step {step}/{num_steps} | Average reward: {mean_reward} | Average sequence length: {mean_sequence_length:.2f}")
+    wandb_run.log({
+        "step": step,
+        "reward": mean_reward,
+        "sequence_length": mean_sequence_length,
+    })
 
-        wandb_run.log({
-            "step": step,
-            "reward" : mean_reward,
-            "sequence_length" : mean_sequence_length,
-        })
+    lrm = get_lr_multiplier(step)
+    for group in optimizer.param_groups:
+        group["lr"] = group["initial_lr"] * lrm
 
-        lrm = get_lr_multiplier(step)
-        for group in optimizer.param_groups:
-            group["lr"] = group["initial_lr"] * lrm
+    optimizer.step()
+    model.zero_grad(set_to_none=True)
+    wandb_run.log({
+        "step": step,
+        "lrm": lrm,
+    })
 
-        optimizer.step()
-        model.zero_grad(set_to_none=True)
-        wandb_run.log({
-            "step":step,
-            "lrm" : lrm,
-        })
-
-        if master_process and ((step>0 and step % args.save_every==0) or step==num_steps -1):
-            base_dir = get_base_dir()
-            depth = model.config.n_layer
-            output_dirname = args. model_tag if args.model_tag else f"d{depth}"
-            checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
-            model_config_kwargs = model.config.__dict__
-            save_checkpoint(
+    if master_process and ((step > 0 and step % args.save_every == 0) or step == num_steps - 1):
+        base_dir = get_base_dir()
+        depth = model.config.n_layer
+        output_dirname = args.model_tag if args.model_tag else f"d{depth}"
+        checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
+        model_config_kwargs = model.config.__dict__
+        save_checkpoint(
             checkpoint_dir,
             step,
             model.state_dict(),
-            None, # note: we don't bother to save the optimizer state
+            None,  # note: we don't bother to save the optimizer state
             {
+                "step": step,
                 "model_config": model_config_kwargs,
-            }
+                "user_config": user_config,
+            },
         )
-        print(f"✅ Saved model checkpoint to {checkpoint_dir}")
+        print0(f"✅ Saved model checkpoint to {checkpoint_dir}")
 
 wandb_run.finish() # wandb run finish
 compute_cleanup()
-
-
-
-
-
-
-
-
-

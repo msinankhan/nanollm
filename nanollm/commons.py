@@ -264,3 +264,46 @@ def get_peak_flops(device_name: str) -> float:
     # Unknown GPU - return inf so MFU shows as 0% rather than a wrong guess
     logger.warning(f"Peak flops undefined for: {device_name}, MFU will show as 0%")
     return float('inf')
+
+def get_peak_bandwidth(device_name: str) -> float:
+    name = device_name.lower()
+
+    table = (
+        (["gb200"], 8.0e12),
+        (["grace blackwell"], 8.0e12),
+        (["b200"], 8.0e12),
+        (["b100"], 8.0e12),
+        (["h200"], 4.8e12),
+        (["h100", "nvl"], 3.9e12),
+        (["h100", "pcie"], 2.0e12),
+        (["h100"], 3.35e12),
+        (["h800", "pcie"], 2.0e12),
+        (["h800"], 3.35e12),
+        (["a100"], 2.0e12),
+        (["a800"], 2.0e12),
+        (["a40"], 696e9),
+        (["a30"], 933e9),
+        (["l40s"], 864e9),
+        (["l40-s"], 864e9),
+        (["l40 s"], 864e9),
+        (["l4"], 300e9),
+        (["mi355"], 8.0e12),
+        (["mi325"], 6.0e12),
+        (["mi300x"], 5.3e12),
+        (["mi300a"], 5.3e12),
+        (["mi250x"], 3.28e12),
+        (["mi250"], 3.28e12),
+        (["5090"], 1.79e12),
+        (["4090"], 1.01e12),
+        (["3090"], 936e9),
+    )
+
+    for patterns, bandwidth in table:
+        if all(pattern in name for pattern in patterns):
+            return bandwidth
+
+    logger.warning(
+        f"Peak bandwidth undefined for: "
+        f"{device_name}; MBU will show as 0%"
+    )
+    return float("inf")
