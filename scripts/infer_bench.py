@@ -108,6 +108,7 @@ def main():
     engine= Engine(model,tokenizer)
 
     max_prompt = config.sequence_len - args.decode_tokens
+    assert max_prompt > 0, ( "decode_tokens must be smaller than sequence_len")
 
     prompt_len = min(args.prompt_tokens, max_prompt)
     if prompt_len < args.prompt_tokens:
@@ -128,7 +129,12 @@ def main():
 
     ceiling_bs1 = peak_bw /(w_bytes + kv_read)
 
-    max_rows = int((total_vram - w_bytes) / (kv_store * config.sequence_len))
+    available_vram = max(total_vram - w_bytes, 0)
+
+    max_rows = int(
+        available_vram
+        / (kv_store * config.sequence_len)
+    )
 
     print('=' * 100)
     print(f"Model: {args.source} {meta.get('model_tag', '')} (step {meta['step']}) |"
@@ -174,3 +180,76 @@ def main():
         "temperature": args.temperature,
         "sweep": [],
     }
+
+
+    bench_generate(engine, prompt_tokens, batch_size=1, decode_tokens=2, temperature=args.temperature)
+    prefill_result = bench_generate(engine,prompt_tokens, 1,2,args.temperature)
+    prefill_time = prefill_result["ttft"]
+    prefill_mfu = 100 * model.estimate_prefill_flops(prompt_len) / prefill_time / peak_flops
+    prefill_tok_per_sec = prompt_len / prefill_time
+
+    print(f"Prefill (batch 1, {prompt_len} tokens): {prefill_tok_per_sec:,.0f} tok/s | MFU {prefill_mfu:.1f}%")
+    payload["prefill"] = {
+        "tok_per_sec" : round(prefill_tok_per_sec,1),
+        "mfu_percent" : round(prefill_mfu,2),
+        "time_sec" : round(prefill_time,6),
+    }
+
+
+    # batch_sizes = [int(b) for b in args.batch_sizes.split(",")]
+    header = f"{'batch':>6} {'TTFT ms' : >9} {'TPOT ms' : >9} {'tok/s':>10} {'MBU %' : >7} {'MFU %':>7} {'VRAM GiB' :>9} {'steps' : >6}"
+
+    print(header)
+
+    print("-" * len(header))
+
+    for batch_size in batch_sizes:
+        bench_generate(engine, prompt_tokens, batch_size, 8,args.temperature)
+
+        result = bench_generate(engine, prompt_tokens, batch_size, args.decode_tokens, args.temperature)
+        step_times = result["step_times"]
+        num_steps = len(step_times)
+        if num_steps ==0:
+            print(f"{batch_size:>6} all rows terminated during warmup?! Skipping!!!")
+            continue
+
+        tpot= sorted(step_times)[num_steps//2]
+        tok_per_sec = batch_size * num_steps / sum(step_times)
+
+        bytes_per_step = w_bytes + batch_size * kv_read
+
+
+        mbu = 100 * (bytes_per_step/tpot) / peak_bw
+
+        flops_per_step = batch_size * model.estimate_decode_flops(context_mid)
+
+        mfu = 100 * (flops_per_step /tpot) / peak_flops
+        vram_gib = result["peak_vram"]/2**30
+
+        note = "" if num_steps == args.decode_tokens -1 else f" (Early Stop @ {num_steps})"
+
+        print (f"{batch_size:>6} {result['ttft']*1e3:>9.1f} {tpot*1e3:>9.2f} {tok_per_sec:>10,.0f} "
+              f"{mbu:>7.1f} {mfu:>7.2f} {vram_gib:>9.2f} {num_steps:>6}{note}")
+
+        payload["sweep"].append({
+            "batch_size" : batch_size,
+            "ttft_sec" : round(result["ttft"], 6),
+            "tpot_sec" : round(tpot, 6),
+            "tok_per_sec": round(tok_per_sec, 1),
+            "mbu_percent" : round(mbu,2),
+            "mfu_percent": round(mfu,4),
+
+            "peak_vram_bytes" : result["peak_vram"],
+            "decode_steps" : num_steps,
+
+        })
+
+
+    print("-" * len(header))
+    print(json.dumps(payload))
+
+    compute_cleanup()
+
+if __name__=="__main__":
+    main()
+    
