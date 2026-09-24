@@ -23,53 +23,6 @@ from scripts.base_eval import evaluate_core
 print_banner()
 
 
-#------------------------------------------------------------------------------------------------------------------------------------
-
-def _load_flash_attention_3():
-    """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""
-    if not torch.cuda.is_available():
-        return None
-    try:
-        major, _ = torch.cuda.get_device_capability()
-        # FA3 kernels are compiled for Hopper (sm90) only
-        # Ada (sm89), Blackwell (sm100) need SDPA fallback until FA3 is recompiled
-        if major != 9:
-            return None
-        import os
-        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-        from kernels import get_kernel
-        return get_kernel('varunneal/flash-attention-3').flash_attn_interface
-    except Exception:
-        return None
-
-
-_fa3 = _load_flash_attention_3()
-HAS_FA3 = _fa3 is not None
-if HAS_FA3:
-    print0(" HAS_FA3: True")
-else:
-    print0(" HAS_FA3: False")
-
-_override_impl = None
-
-def _resolve_use_fa3():
-    """Decide once whether to use FA3, based on availability, override, and dtype."""
-    if _override_impl == 'fa3':
-        assert HAS_FA3, "Cannot override to FA3: not available on this hardware"
-        return True
-    if _override_impl == 'sdpa':
-        return False
-    if HAS_FA3:
-        # FA3 Hopper kernels only support bf16 and fp8; fp16/fp32 must use SDPA fallback
-        if COMPUTE_DTYPE == torch.bfloat16:
-            return True
-        return False
-    return False
-
-USE_FA3 = _resolve_use_fa3()
-
-
-#--------------------------------------------------------------------------------------------------------------------------------------
 
 
 parser = argparse.ArgumentParser(description="Pretrain base model")

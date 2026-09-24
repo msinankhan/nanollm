@@ -19,13 +19,17 @@ CAP_STR = f"sm_{COMPUTE_CAP[0]}{COMPUTE_CAP[1]}" if COMPUTE_CAP else "no CUDA"
 def _smoke_test(fn, label):
     """Importing a kernel proves nothing; executing it proves everything.
 
-    A tiny windowed call exercises both the causal path and the sliding-window
-    path, so a backend that lacks local-attention support fails here rather
-    than 4000 steps into a training run.
+    A tiny windowed call exercises BOTH the causal path and the sliding-window
+    path, so a backend lacking local-attention support fails here rather than
+    4000 steps into a training run.
     """
     q = torch.randn(1, 64, 2, 64, dtype=torch.bfloat16, device="cuda")
     fn(q, q, q, causal=True, window_size=(32, 0))
     torch.cuda.synchronize()
+
+
+# --- every loader returns the SAME shape: (payload_or_None, reason) ---------
+# payload is (attention_fn, kvcache_fn) when it succeeded, None when declined.
 
 
 def _try_fa2():
@@ -35,31 +39,43 @@ def _try_fa2():
     from flash_attn import flash_attn_func, flash_attn_with_kvcache
     _smoke_test(flash_attn_func, "fa2")
     import flash_attn as _m
-    return (flash_attn_func, flash_attn_with_kvcache,
+    return ((flash_attn_func, flash_attn_with_kvcache),
             f"flash-attn {getattr(_m, '__version__', '?')} natively compiled for {CAP_STR}")
 
 
 def _try_fa3_hub():
     """FlashAttention 3 from the HF kernels hub.
 
-    `version=` is REQUIRED as of kernels 0.17.x -- the old
-    get_kernel('repo') one-arg form now raises ValueError.
+    `version=` is REQUIRED as of kernels 0.17.x -- and that applies to
+    has_kernel() too, not just get_kernel(). Calling either without a
+    version/revision raises ValueError before any arch check happens.
 
     metadata declares archs ["8.0", "9.0a"] only:
       - sm_90 loads the sm90a build directly
       - sm_80/86/89 load the sm_80 build via binary compatibility
       - sm_120 is REJECTED by the arch validator -> has_kernel() is False
+
+    varunneal/flash-attention-3 (which nanochat prefers on Hopper) now fails
+    publisher-trust verification, so it is attempted only with
+    trust_remote_code=True, and only as a second choice.
     """
-    major = COMPUTE_CAP[0] if COMPUTE_CAP else -1
-    if major not in (8, 9):
-        return None, f"{CAP_STR} not in FA3's declared archs (8.0, 9.0a)"
     from kernels import get_kernel, has_kernel
-    repo = "varunneal/flash-attention-3" if major == 9 else "kernels-community/flash-attn3"
-    if not has_kernel(repo):
-        return None, f"has_kernel({repo}) is False"
-    itf = get_kernel(repo, version=2).flash_attn_interface
-    _smoke_test(itf.flash_attn_func, "fa3_hub")
-    return (itf.flash_attn_func, itf.flash_attn_with_kvcache), f"{repo} v2 on {CAP_STR}"
+    candidates = [("kernels-community/flash-attn3", False),
+                  ("varunneal/flash-attention-3", True)]
+    reasons = []
+    for repo, needs_trust in candidates:
+        try:
+            if not has_kernel(repo, version=2, trust_remote_code=needs_trust):
+                reasons.append(f"{repo}: has_kernel=False")
+                continue
+            itf = get_kernel(repo, version=2,
+                             trust_remote_code=needs_trust).flash_attn_interface
+            _smoke_test(itf.flash_attn_func, "fa3_hub")
+            return ((itf.flash_attn_func, itf.flash_attn_with_kvcache),
+                    f"{repo} v2 on {CAP_STR}")
+        except Exception as e:
+            reasons.append(f"{repo}: {type(e).__name__}: {str(e)[:80]}")
+    return None, " | ".join(reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +83,8 @@ def _try_fa3_hub():
 #
 #   sm_120 (Blackwell)  -> fa2 only; FA3 cannot run there at all
 #   sm_90  (Hopper)     -> native FA3 kernels, so prefer them
-#   sm_80/86/89         -> fa2 is natively built; fa3_hub only via compat
-#   anything else       -> sdpa (the EAGER fallback inside flash_attn_func)
+#   sm_80/86/89         -> fa2 natively built; fa3_hub only via compat
+#   anything else       -> sdpa  (the fallback inside _backend_func)
 # ---------------------------------------------------------------------------
 if COMPUTE_CAP is None:
     PREFERENCE = []
@@ -86,6 +102,8 @@ else:
     PREFERENCE = []
     PREFERENCE_NOTE = f"{CAP_STR} unsupported by any fused kernel, using SDPA"
 
+# Optional override for A/B testing later: "fa2" | "fa3_hub" | "sdpa" | None
+_override_impl = None
 
 _FAILURES = []
 BACKEND = None
@@ -94,16 +112,21 @@ BACKEND_REASON = ""
 for _candidate in PREFERENCE:
     _name = _candidate.__name__.replace("_try_", "")
     try:
-        _res = _candidate()
-        # a loader may decline gracefully (returning None) or succeed
-        if isinstance(_res, tuple) and len(_res) == 2 and _res[0] is None:
-            _FAILURES.append(f"{_name}: {_res[1]}")
-            continue
-        _func, _kvcache, _why = _res
-        BACKEND, BACKEND_REASON = _name, _why
-        break
+        _payload, _why = _candidate()
     except Exception as _e:
         _FAILURES.append(f"{_name}: {type(_e).__name__}: {str(_e)[:120]}")
+        continue
+    if _payload is None:          # declined gracefully (wrong arch, etc.)
+        _FAILURES.append(f"{_name}: {_why}")
+        continue
+    _func, _kvcache = _payload
+    BACKEND, BACKEND_REASON = _name, _why
+    break
+
+if _override_impl == "sdpa":
+    BACKEND, BACKEND_REASON = None, "forced to sdpa by _override_impl"
+elif _override_impl is not None and BACKEND != _override_impl:
+    _FAILURES.append(f"override {_override_impl} requested but not selected")
 
 if BACKEND is None:
     BACKEND_REASON = (PREFERENCE_NOTE +
@@ -112,7 +135,7 @@ if BACKEND is None:
 
 def _backend_func(q, k, v, causal=False, window_size=(-1, -1)):
     """Dispatch to the selected fused kernel, or fall through to SDPA."""
-    if BACKEND == "fa2":
+    if BACKEND in ("fa2", "fa3_hub"):
         return _func(q, k, v, causal=causal, window_size=window_size)
 
     # SDPA fallback: (B, T, H, D) -> (B, H, T, D)
@@ -124,7 +147,7 @@ def _backend_func(q, k, v, causal=False, window_size=(-1, -1)):
 def _backend_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None,
                      causal=False, window_size=(-1, -1)):
     """Dispatch to the selected fused kernel, or fall through to SDPA."""
-    if BACKEND == "fa2":
+    if BACKEND in ("fa2", "fa3_hub"):
         return _func(q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
                      causal=causal, window_size=window_size)
 
@@ -141,15 +164,12 @@ def _backend_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None,
     return y.transpose(1, 2)
 
 
-# Keep gpt.py working unchanged: it calls
-#   flash_attn.flash_attn_func(...)  and  flash_attn.flash_attn_with_kvcache(...)
 from types import SimpleNamespace
 flash_attn = SimpleNamespace(
     flash_attn_func=_backend_func,
     flash_attn_with_kvcache=_backend_kvcache,
 )
 
-# Aliases so nothing else in the repo breaks.
 HAS_FA3 = BACKEND in ("fa2", "fa3_hub")
 USE_FA3 = BACKEND in ("fa2", "fa3_hub")
 
@@ -234,9 +254,9 @@ def flash_attn_with_kvcache(q,k_cache,v_cache,k=None,v=None,cache_seqlens=None,c
     return y_sdpa.transpose(1,2)
 
 
-from types import SimpleNamespace
+# from types import SimpleNamespace
 
-flash_attn = SimpleNamespace(
-    flash_attn_func=flash_attn_func,
-    flash_attn_with_kvcache=flash_attn_with_kvcache,
-)
+# flash_attn = SimpleNamespace(
+#     flash_attn_func=flash_attn_func,
+#     flash_attn_with_kvcache=flash_attn_with_kvcache,
+# )

@@ -7,12 +7,7 @@ import torch.nn.functional as F
 from nanollm.commons import get_dist_info, print0, COMPUTE_DTYPE
 from nanollm.optim import MuonAdamW, DistMuonAdamW
 
-
-import os 
-os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-
-from kernels import get_kernel
-flash_attn=get_kernel('varunneal/flash-attention-3').flash_attn_interface
+from nanollm.flash_attention import flash_attn, backend_report
 
 @dataclass
 class GPTConfig:
