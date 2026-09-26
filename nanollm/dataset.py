@@ -14,7 +14,7 @@ MAX_SHARDS=1822
 
 index_to_filename=lambda index:f"shard_{index:05d}.parquet"
 base_dir=get_base_dir()
-DATA_DIR=os.path.join(base_dir, "base_data")
+DATA_DIR=os.environ.get("NANOLLM_DATA_DIR", os.path.join(base_dir, "base_data"))
 os.makedirs(DATA_DIR,exist_ok=True)
 
 

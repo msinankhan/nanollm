@@ -1,7 +1,7 @@
+import os
 import torch
 import torch.nn.functional as F
 
-import warnings
 
 # ---------------------------------------------------------------------------
 # Capability probe: decide the backend from the GPU, BEFORE loading anything.
@@ -19,12 +19,14 @@ CAP_STR = f"sm_{COMPUTE_CAP[0]}{COMPUTE_CAP[1]}" if COMPUTE_CAP else "no CUDA"
 def _smoke_test(fn, label):
     """Importing a kernel proves nothing; executing it proves everything.
 
-    A tiny windowed call exercises BOTH the causal path and the sliding-window
-    path, so a backend lacking local-attention support fails here rather than
-    4000 steps into a training run.
+    This exercises BF16, grouped-query attention, causal sliding-window
+    attention, and backward before a training run starts.
     """
-    q = torch.randn(1, 64, 2, 64, dtype=torch.bfloat16, device="cuda")
-    fn(q, q, q, causal=True, window_size=(32, 0))
+    q = torch.randn(1, 64, 4, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    k = torch.randn(1, 64, 2, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    v = torch.randn(1, 64, 2, 64, dtype=torch.bfloat16, device="cuda", requires_grad=True)
+    out = fn(q, k, v, causal=True, window_size=(32, 0))
+    out.float().square().mean().backward()
     torch.cuda.synchronize()
 
 
@@ -41,6 +43,17 @@ def _try_fa2():
     import flash_attn as _m
     return ((flash_attn_func, flash_attn_with_kvcache),
             f"flash-attn {getattr(_m, '__version__', '?')} natively compiled for {CAP_STR}")
+
+
+def _try_fa2_hub():
+    """Prebuilt FlashAttention 2 binaries, including sm_120."""
+    from kernels import get_kernel
+    module = get_kernel("kernels-community/flash-attn2", version=2)
+    interface = getattr(module, "flash_attn_interface", module)
+    func = interface.flash_attn_func
+    kvcache = interface.flash_attn_with_kvcache
+    _smoke_test(func, "fa2_hub")
+    return ((func, kvcache), f"kernels-community/flash-attn2 v2 on {CAP_STR}")
 
 
 def _try_fa3_hub():
@@ -90,20 +103,30 @@ if COMPUTE_CAP is None:
     PREFERENCE = []
     PREFERENCE_NOTE = "no CUDA device, using SDPA"
 elif COMPUTE_CAP[0] == 12:
-    PREFERENCE = [_try_fa2]
-    PREFERENCE_NOTE = "Blackwell sm_120: only flash-attn 2 supports this architecture"
+    PREFERENCE = [_try_fa2_hub, _try_fa2]
+    PREFERENCE_NOTE = "Blackwell sm_120: prebuilt FA2 preferred"
 elif COMPUTE_CAP[0] == 9:
-    PREFERENCE = [_try_fa3_hub, _try_fa2]
+    PREFERENCE = [_try_fa3_hub, _try_fa2_hub, _try_fa2]
     PREFERENCE_NOTE = "Hopper sm_90: native FA3 kernels preferred"
 elif COMPUTE_CAP[0] in (8, 10, 11):
-    PREFERENCE = [_try_fa2, _try_fa3_hub]
+    PREFERENCE = [_try_fa2_hub, _try_fa2, _try_fa3_hub]
     PREFERENCE_NOTE = f"{CAP_STR}: natively built FA2 preferred over FA3 compat path"
 else:
     PREFERENCE = []
     PREFERENCE_NOTE = f"{CAP_STR} unsupported by any fused kernel, using SDPA"
 
-# Optional override for A/B testing later: "fa2" | "fa3_hub" | "sdpa" | None
-_override_impl = None
+# Optional override for reproducible A/B tests.
+_override_impl = os.environ.get("NANOLLM_ATTN_BACKEND", "auto").lower()
+if _override_impl not in ("auto", "fa2_hub", "fa2", "fa3_hub", "sdpa"):
+    raise ValueError("NANOLLM_ATTN_BACKEND must be auto, fa2_hub, fa2, fa3_hub, or sdpa")
+if _override_impl == "fa2_hub":
+    PREFERENCE = [_try_fa2_hub]
+elif _override_impl == "fa2":
+    PREFERENCE = [_try_fa2]
+elif _override_impl == "fa3_hub":
+    PREFERENCE = [_try_fa3_hub]
+elif _override_impl == "sdpa":
+    PREFERENCE = []
 
 _FAILURES = []
 BACKEND = None
@@ -124,9 +147,9 @@ for _candidate in PREFERENCE:
     break
 
 if _override_impl == "sdpa":
-    BACKEND, BACKEND_REASON = None, "forced to sdpa by _override_impl"
-elif _override_impl is not None and BACKEND != _override_impl:
-    _FAILURES.append(f"override {_override_impl} requested but not selected")
+    BACKEND, BACKEND_REASON = None, "forced by NANOLLM_ATTN_BACKEND=sdpa"
+elif _override_impl != "auto" and BACKEND != _override_impl:
+    raise RuntimeError(f"Requested attention backend {_override_impl!r} failed on {CAP_STR}: " + " | ".join(_FAILURES))
 
 if BACKEND is None:
     BACKEND_REASON = (PREFERENCE_NOTE +
@@ -135,7 +158,7 @@ if BACKEND is None:
 
 def _backend_func(q, k, v, causal=False, window_size=(-1, -1)):
     """Dispatch to the selected fused kernel, or fall through to SDPA."""
-    if BACKEND in ("fa2", "fa3_hub"):
+    if BACKEND in ("fa2_hub", "fa2", "fa3_hub"):
         return _func(q, k, v, causal=causal, window_size=window_size)
 
     # SDPA fallback: (B, T, H, D) -> (B, H, T, D)
@@ -147,8 +170,8 @@ def _backend_func(q, k, v, causal=False, window_size=(-1, -1)):
 def _backend_kvcache(q, k_cache, v_cache, k=None, v=None, cache_seqlens=None,
                      causal=False, window_size=(-1, -1)):
     """Dispatch to the selected fused kernel, or fall through to SDPA."""
-    if BACKEND in ("fa2", "fa3_hub"):
-        return _func(q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
+    if BACKEND in ("fa2_hub", "fa2", "fa3_hub"):
+        return _kvcache(q, k_cache, v_cache, k=k, v=v, cache_seqlens=cache_seqlens,
                      causal=causal, window_size=window_size)
 
     B, T_new, H, D = q.shape
@@ -170,8 +193,8 @@ flash_attn = SimpleNamespace(
     flash_attn_with_kvcache=_backend_kvcache,
 )
 
-HAS_FA3 = BACKEND in ("fa2", "fa3_hub")
-USE_FA3 = BACKEND in ("fa2", "fa3_hub")
+HAS_FA3 = BACKEND in ("fa2_hub", "fa2", "fa3_hub")
+USE_FA3 = BACKEND in ("fa2_hub", "fa2", "fa3_hub")
 
 
 def backend_report():
@@ -209,54 +232,3 @@ def _sdpa_attention(q,k,v,window_size, enable_gqa):
         mask = mask & ((row_idx-col_idx)<=window)
 
     return F.scaled_dot_product_attention(q,k,v, attn_mask=mask, enable_gqa=enable_gqa)
-
-
-
-
-def flash_attn_func(q,k,v,causal=False,window_size=(-1,-1)):
-    if _Use_FA3:
-        return _fa3.flash_attn_func(q,k,v,causal=causal,window_size=window_size)
-
-    q=q.transpose(1,2)
-    k=k.transpose(1,2)
-    v=v.transpose(1,2)
-    enable_gqa=q.size(1) != k.size(1)
-
-    y= _sdpa_attention(q,k,v,window_size, enable_gqa)
-
-    return y.transpose(1,2)
-
-
-def flash_attn_with_kvcache(q,k_cache,v_cache,k=None,v=None,cache_seqlens=None,causal=False,window_size=(-1,-1)):
-    if _Use_FA3:
-        return _fa3.flash_attn_with_kvcache(q,k_cache,v_cache,k=k,v=v,cache_seqlens=cache_seqlens,causal=causal,window_size=window_size)
-
-
-    B,T_new,H,D=q.shape
-    pos=cache_seqlens[0].item()
-
-    if k is not None and v is not None:
-        k_cache[:,pos:pos+T_new,:,:] = k
-        v_cache[:,pos:pos+T_new,:,:] = v
-
-    end=pos+T_new
-
-    k_full= k_cache[:,:end,:,:]
-    v_full= v_cache[:,:end,:,:]
-
-    q_sdpa=q.transpose(1,2)
-    k_sdpa=k_full.transpose(1,2)
-    v_sdpa=v_full.transpose(1,2)
-
-    enable_gqa= q_sdpa.size(1)!=k_sdpa.size(1)
-    y_sdpa= _sdpa_attention(q_sdpa,k_sdpa,v_sdpa,window_size,enable_gqa)
-
-    return y_sdpa.transpose(1,2)
-
-
-# from types import SimpleNamespace
-
-# flash_attn = SimpleNamespace(
-#     flash_attn_func=flash_attn_func,
-#     flash_attn_with_kvcache=flash_attn_with_kvcache,
-# )

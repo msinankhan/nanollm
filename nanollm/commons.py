@@ -218,6 +218,7 @@ def get_peak_flops(device_name: str) -> float:
     # Table order matters: more specific patterns first.
     _PEAK_FLOPS_TABLE = (
         # NVIDIA Blackwell
+        (["rtx pro 6000"], 467.8e12),
         (["gb200"], 2.5e15),
         (["grace blackwell"], 2.5e15),
         (["b200"], 2.25e15),
@@ -269,6 +270,7 @@ def get_peak_bandwidth(device_name: str) -> float:
     name = device_name.lower()
 
     table = (
+        (["rtx pro 6000"], 1.597e12),
         (["gb200"], 8.0e12),
         (["grace blackwell"], 8.0e12),
         (["b200"], 8.0e12),

@@ -12,10 +12,11 @@ import torch
 import torch.distributed as dist
 
 from nanollm.gpt import GPT, GPTConfig
+from nanollm.flash_attention import backend_report, HAS_FA3, USE_FA3
 from nanollm.dataloader import tokenizing_distributed_data_loader_with_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanollm.commons import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON
 from nanollm.tokenizer import get_tokenizer, get_token_bytes    
-from nanollm.checkpoint_manager import save_checkpoint, load_checkpoint
+from nanollm.checkpoint_manager import AsyncCheckpointWriter, save_checkpoint, load_checkpoint
 from nanollm.loss_eval import evaluate_bpb
 from nanollm.engine import Engine
 from scripts.base_eval import evaluate_core
@@ -67,11 +68,19 @@ parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number o
 parser.add_argument("--core-metric-every", type=int, default=2000, help="evaluate CORE metric every N steps (-1 = disable)")
 parser.add_argument("--core-metric-max-per-task", type=int, default=500, help="examples per task for CORE metric")
 parser.add_argument("--sample-every", type=int, default=2000, help="sample from model every N steps (-1 = disable)")
-parser.add_argument("--save-every", type=int, default=250, help="save checkpoints every N steps (-1 = only at end)")
+parser.add_argument("--save-every", type=int, default=-1, help="also save every N steps (-1 = time-based only)")
+parser.add_argument("--save-every-minutes", type=float, default=60, help="publish a durable checkpoint at least this often (-1 = disable)")
+parser.add_argument("--first-save-minutes", type=float, default=15, help="time to the first durable checkpoint")
+parser.add_argument("--keep-checkpoints", type=int, default=2, help="number of completed checkpoints to retain")
+parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
+parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 = disable)")
+parser.add_argument("--exit-guard-minutes", type=float, default=20, help="minutes reserved for the final checkpoint upload")
 # Output
 parser.add_argument("--model-tag", type=str, default=None, help="override model tag for checkpoint directory name")
 args = parser.parse_args()
 user_config=vars(args).copy()
+if args.max_runtime_minutes > 0 and args.exit_guard_minutes >= args.max_runtime_minutes:
+    parser.error("--exit-guard-minutes must be smaller than --max-runtime-minutes")
 
 
 device_type= autodetect_device_type() if args.device_type=="" else args.device_type
@@ -115,16 +124,12 @@ wandb_run=DummyWandb() if use_dummy_wandb else wandb.init(project="nanollm", nam
 #     print0("!" * 80)
 
 
-using_fa3 = USE_FA3
-if using_fa3:
-    print0("✓ Using Flash Attention 3 (Hopper GPU detected), efficient, new and awesome.")
-else:
+print0(backend_report())
+using_fused_attention = USE_FA3
+if not using_fused_attention:
     print0("!" * 80)
-    if HAS_FA3 and COMPUTE_DTYPE != torch.bfloat16:
-        print0(f"WARNING: Flash Attention 3 only supports bf16, but COMPUTE_DTYPE={COMPUTE_DTYPE}. Using PyTorch SDPA fallback")
-    else:
-        print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback")
-    print0("WARNING: Training will be less efficient without FA3")
+    print0("WARNING: No fused attention backend is available; using PyTorch SDPA")
+    print0("WARNING: Training will be less efficient without fused attention")
     if args.window_pattern != "L":
         print0(f"WARNING: SDPA has no support for sliding window attention (window_pattern='{args.window_pattern}'). Your GPU utilization will be terrible.")
         print0("WARNING: Recommend using --window-pattern L for full context attention without alternating sliding window patterns.")
@@ -174,6 +179,12 @@ model.init_weights() # 3) All tensors get initialized
 base_dir=get_base_dir()
 output_dirname = args.model_tag if args.model_tag else f"d{args.depth}"
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+checkpoint_writer = AsyncCheckpointWriter(
+    checkpoint_dir, staging_dir=args.checkpoint_staging_dir, keep_last=args.keep_checkpoints
+) if master_process and ddp_world_size == 1 else None
+session_started = time.monotonic()
+last_checkpoint_started = session_started
+has_saved_this_session = False
 resuming = args.resume_from_step != -1
 
 if resuming:
@@ -546,10 +557,25 @@ print0(f"Total batch size: {total_batch_size:,} => gradient accumulation steps: 
 
 
 while True:
-    last_step= step==num_iterations 
+    last_step= step==num_iterations
+    now = time.monotonic()
+    elapsed_minutes = (now - session_started) / 60
+    time_to_exit = (
+        args.max_runtime_minutes > 0
+        and elapsed_minutes >= args.max_runtime_minutes - args.exit_guard_minutes
+    )
+    checkpoint_age_minutes = (now - last_checkpoint_started) / 60
+    time_checkpoint_due = (
+        step > 0 and args.save_every_minutes > 0 and (
+            (not has_saved_this_session and elapsed_minutes >= args.first_save_minutes)
+            or (has_saved_this_session and checkpoint_age_minutes >= args.save_every_minutes)
+        )
+    )
+    if time_to_exit:
+        print0(f"Wall-clock guard reached after {elapsed_minutes:.1f} minutes; saving and exiting cleanly")
     flops_so_far = num_flops_per_token * total_batch_size *step
 
-    if args.eval_every >0 and (last_step or step % args.eval_every==0):
+    if not time_to_exit and args.eval_every >0 and (last_step or step % args.eval_every==0):
         model.eval()
         val_loader=build_val_loader()
         eval_steps= args.eval_tokens//(args.device_batch_size * args.max_seq_len * ddp_world_size)
@@ -567,7 +593,7 @@ while True:
         model.train()
 
     results={}
-    if args.core_metric_every >0 and (last_step or (step>0 and step % args.core_metric_every ==0)):
+    if not time_to_exit and args.core_metric_every >0 and (last_step or (step>0 and step % args.core_metric_every ==0)):
         model.eval()
         with disable_fp8(orig_model):
             results= evaluate_core(orig_model, tokenizer, device, max_per_task=args.core_metric_max_per_task)
@@ -581,7 +607,7 @@ while True:
             })
         model.train()
 
-    if args.sample_every >0 and master_process and (last_step or (step>0 and step % args.sample_every==0)):
+    if not time_to_exit and args.sample_every >0 and master_process and (last_step or (step>0 and step % args.sample_every==0)):
         model.eval()
         prompts=[
                 "The capital of France is",
@@ -601,30 +627,40 @@ while True:
 
         model.train()
 
-    if last_step or (step>0 and step!= args.resume_from_step and args.save_every>0 and step%args.save_every==0):
-        save_checkpoint(
-            checkpoint_dir,
-            step,
-            orig_model.state_dict(),
-            optimizer.state_dict(),
-            {
-                "step":step,
-                "val_bpb": val_bpb,
-                "model_config": model_config_kwargs,
-                "user_config": user_config,
-                "device_batch_size": args.device_batch_size,
-                "max_seq_len":args.max_seq_len,
-                "total_batch_size": total_batch_size,
-                "dataloader_state_dict": dataloader_state_dict,
-                "loop_state":{
-                    "min_val_bpb": min_val_bpb,
-                    "smooth_train_loss": smooth_train_loss,
-                    "total_training_time":total_training_time,
-                },
+    step_checkpoint_due = (
+        step > 0 and step != args.resume_from_step
+        and args.save_every > 0 and step % args.save_every == 0
+    )
+    save_due = last_step or time_to_exit or time_checkpoint_due or step_checkpoint_due
+    if save_due:
+        checkpoint_meta = {
+            "step": step,
+            "val_bpb": val_bpb,
+            "model_config": model_config_kwargs,
+            "user_config": user_config,
+            "device_batch_size": args.device_batch_size,
+            "max_seq_len": args.max_seq_len,
+            "total_batch_size": total_batch_size,
+            "dataloader_state_dict": dataloader_state_dict,
+            "loop_state": {
+                "min_val_bpb": min_val_bpb,
+                "smooth_train_loss": smooth_train_loss,
+                "total_training_time": total_training_time,
             },
-            rank=ddp_rank,
-        )
-    if last_step: # termination conditions (TODO: possibly also add loss explosions etc.)
+        }
+        if checkpoint_writer is not None:
+            checkpoint_writer.submit(
+                step, orig_model.state_dict(), optimizer.state_dict(), checkpoint_meta,
+                rank=ddp_rank,
+            )
+        else:
+            save_checkpoint(
+                checkpoint_dir, step, orig_model.state_dict(), optimizer.state_dict(),
+                checkpoint_meta, rank=ddp_rank,
+            )
+        last_checkpoint_started = time.monotonic()
+        has_saved_this_session = True
+    if last_step or time_to_exit:
         break
 
     synchronize() #It forces the CPU to wait until all GPU kernels finish. because GPUs are async and if t1-t0 will be wrong as the CPU continues with the script if we don't synchronize and the time diff is calculated on the CPU.
@@ -751,7 +787,11 @@ while True:
     elif step %5000 ==0:
         gc.collect()
 
-            
+
+if checkpoint_writer is not None:
+    print0("Waiting for the final checkpoint publish to complete...")
+    checkpoint_writer.wait()
+
 print0(f"Peak memory usage: {get_max_memory()/1024/1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
 
