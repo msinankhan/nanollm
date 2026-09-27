@@ -51,7 +51,7 @@ def _try_fa2_hub():
     # Pin the verified cxx11 build containing torch 2.10 / CUDA 12.8 / sm_120.
     # Package v3 uses the stable ABI, whose GQA backward is broken upstream:
     # https://github.com/huggingface/kernels-community/issues/1085
-    revision = "203236346cde5f75f47035f18f4baa8767c558f5"
+    revision = "f50dc99ed079b35990bc895d43fd353ea0cb376d"
     module = get_kernel("kernels-community/flash-attn2", revision=revision)
     interface = getattr(module, "flash_attn_interface", module)
     func = interface.flash_attn_func
