@@ -19,6 +19,7 @@ setup_default_logging()
 logger=logging.getLogger(__name__)
 
 CHECKPOINT_FORMAT_VERSION = 1
+TRAINING_COMPLETE_FILENAME = "training.complete.json"
 
 def _sha256(path, chunk_size=8 * 1024 * 1024):
     digest = hashlib.sha256()
@@ -35,6 +36,39 @@ def _checkpoint_filenames(step, rank=0, has_optimizer=True):
 
 def _complete_path(checkpoint_dir, step):
     return os.path.join(checkpoint_dir, f"checkpoint_{step:06d}.complete.json")
+
+def _training_complete_path(checkpoint_dir):
+    return os.path.join(checkpoint_dir, TRAINING_COMPLETE_FILENAME)
+
+def mark_training_complete(checkpoint_dir, step, num_iterations, metadata=None):
+    """Publish a small marker only after the final checkpoint is durable."""
+    _validate_committed_checkpoint(checkpoint_dir, step, require_optimizer=False)
+    payload = {
+        "format_version": CHECKPOINT_FORMAT_VERSION,
+        "step": step,
+        "num_iterations": num_iterations,
+        "complete": True,
+    }
+    if metadata:
+        payload.update(metadata)
+    _atomic_json_save(payload, _training_complete_path(checkpoint_dir))
+    logger.info(f"Marked training complete at step {step} in {checkpoint_dir}")
+
+def clear_training_complete(checkpoint_dir):
+    path = _training_complete_path(checkpoint_dir)
+    if os.path.exists(path):
+        os.remove(path)
+
+def read_training_complete(checkpoint_dir):
+    path = _training_complete_path(checkpoint_dir)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if payload.get("complete") is not True:
+        raise ValueError(f"Invalid training completion marker: {path}")
+    _validate_committed_checkpoint(checkpoint_dir, int(payload["step"]))
+    return payload
 
 def log0(message):
     if int(os.environ.get('RANK',0))==0:

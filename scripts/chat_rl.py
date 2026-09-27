@@ -1,11 +1,19 @@
 import argparse
 import os
 import itertools
+import time
 import wandb
 import torch
 import torch.distributed as dist
 from nanollm.commons import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb, autodetect_device_type
-from nanollm.checkpoint_manager import save_checkpoint, load_model
+from nanollm.checkpoint_manager import (
+    AsyncCheckpointWriter,
+    find_last_step,
+    load_model,
+    load_optimizer_state,
+    mark_training_complete,
+    save_checkpoint,
+)
 from nanollm.engine import Engine
 from tasks.gsm8k import GSM8K
 
@@ -18,6 +26,7 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 # Model loading
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
+parser.add_argument("--resume-from-step", type=str, default=None, help="resume ChatRL from an integer checkpoint step or 'latest'")
 # Training horizon
 parser.add_argument("--num-epochs", type=int, default=1, help="number of epochs over GSM8K")
 # Batch sizes / sampling
@@ -38,8 +47,13 @@ parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR
 parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k every N steps")
 parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
 parser.add_argument("--save-every", type=int, default=60, help="save checkpoint every N steps")
+parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
+parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 disables)")
+parser.add_argument("--exit-guard-minutes", type=float, default=20, help="minutes reserved for the final checkpoint publish")
 args = parser.parse_args()
 user_config = vars(args).copy()
+if args.max_runtime_minutes > 0 and args.exit_guard_minutes >= args.max_runtime_minutes:
+    parser.error("--exit-guard-minutes must be smaller than --max-runtime-minutes")
 
 
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
@@ -50,7 +64,28 @@ master_process = ddp_rank ==0
 use_dummy_wandb = args.run == "dummy" or not master_process
 wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanollm-rl", name=args.run, config=user_config)
 
-model,tokenizer,meta = load_model("sft", device, phase="eval", model_tag= args.model_tag, step=args.model_step)
+base_dir = get_base_dir()
+resume_checkpoint_step = None
+if args.resume_from_step is not None:
+    if args.model_tag is None:
+        parser.error("--model-tag is required when resuming ChatRL")
+    rl_checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", args.model_tag)
+    if args.resume_from_step == "latest":
+        resume_checkpoint_step = find_last_step(rl_checkpoint_dir)
+    else:
+        try:
+            resume_checkpoint_step = int(args.resume_from_step)
+        except ValueError:
+            parser.error("--resume-from-step must be an integer or 'latest'")
+    if resume_checkpoint_step < 0:
+        parser.error("--resume-from-step must be non-negative")
+
+resuming = resume_checkpoint_step is not None
+source = "rl" if resuming else "sft"
+source_step = resume_checkpoint_step if resuming else args.model_step
+model,tokenizer,meta = load_model(source, device, phase="eval", model_tag=args.model_tag, step=source_step)
+if resuming:
+    print0(f"Resuming ChatRL from checkpoint step {resume_checkpoint_step}")
 engine= Engine(model,tokenizer)
 
 
@@ -68,6 +103,18 @@ assert args.temperature >= 0
 assert args.top_k >= 0
 num_steps = (len(train_task)// args.examples_per_step) * args.num_epochs
 
+if resuming:
+    saved_config = meta.get("user_config", {})
+    for name in (
+        "num_epochs", "device_batch_size", "examples_per_step", "num_samples",
+        "max_new_tokens", "temperature", "top_k", "embedding_lr",
+        "unembedding_lr", "matrix_lr", "weight_decay", "init_lr_frac",
+    ):
+        saved = saved_config.get(name)
+        current = getattr(args, name)
+        if saved is not None and saved != current:
+            raise ValueError(f"ChatRL resume changed {name}: checkpoint={saved}, current={current}")
+
 
 assert num_steps > 0
 assert args.examples_per_step % ddp_world_size == 0
@@ -75,14 +122,15 @@ assert args.examples_per_step % ddp_world_size == 0
 print0(f"Calculate number of steps: {num_steps}")
 
 @torch.no_grad()
-def get_batch():
+def get_batch(start_example_offset=0):
 
     assistant_end = tokenizer.encode_special("<|assistant_end|>")
     rank_indices = range(ddp_rank, len(train_task), ddp_world_size)
 
     assert len(rank_indices) > 0
 
-    for example_idx in itertools.cycle(rank_indices):
+    example_indices = itertools.islice(itertools.cycle(rank_indices), start_example_offset, None)
+    for example_idx in example_indices:
 
         conversation = train_task[example_idx]
         tokens = tokenizer.render_for_completion(conversation)
@@ -194,9 +242,17 @@ optimizer = model.setup_optimizer(
     weight_decay=args.weight_decay,
 )
 
-for group in optimizer.param_groups:
-    group["lr"] = group["lr"] * args.init_lr_frac
-    group["initial_lr"] = group['lr']
+if resuming:
+    optimizer_data = load_optimizer_state(
+        "rl", device=device, rank=ddp_rank, model_tag=args.model_tag, step=resume_checkpoint_step
+    )
+    optimizer.load_state_dict(optimizer_data)
+    del optimizer_data
+
+if not resuming:
+    for group in optimizer.param_groups:
+        group["lr"] = group["lr"] * args.init_lr_frac
+        group["initial_lr"] = group['lr']
 
 def get_lr_multiplier(it):
     lrm = 1.0 - it / num_steps
@@ -207,9 +263,54 @@ assert args.examples_per_step % ddp_world_size ==0, "Desired examples per step m
 examples_per_rank = args.examples_per_step // ddp_world_size
 print0(f"Calculated examples per rank: {examples_per_rank}")
 
-batch_iterator = get_batch()
+start_step = meta.get("next_step", 0) if resuming else 0
+if start_step >= num_steps:
+    raise ValueError(f"ChatRL checkpoint is already at the end of training: next_step={start_step}, num_steps={num_steps}")
+batch_iterator = get_batch(start_example_offset=start_step * examples_per_rank)
+output_dirname = args.model_tag if args.model_tag else f"d{model.config.n_layer}"
+checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
+checkpoint_writer = AsyncCheckpointWriter(
+    checkpoint_dir,
+    staging_dir=args.checkpoint_staging_dir,
+    keep_last=2,
+) if master_process and ddp_world_size == 1 else None
+session_started = time.monotonic()
+stopped_for_time = False
 
-for step in range(num_steps):
+
+def submit_rl_checkpoint(completed_step, next_step):
+    checkpoint_meta = {
+        "step": completed_step,
+        "next_step": next_step,
+        "model_config": model.config.__dict__,
+        "user_config": user_config,
+    }
+    if checkpoint_writer is not None:
+        checkpoint_writer.submit(
+            completed_step, model.state_dict(), optimizer.state_dict(), checkpoint_meta
+        )
+    else:
+        save_checkpoint(
+            checkpoint_dir,
+            completed_step,
+            model.state_dict(),
+            optimizer.state_dict(),
+            checkpoint_meta,
+        )
+
+for step in range(start_step, num_steps):
+
+    elapsed_minutes = (time.monotonic() - session_started) / 60
+    if (
+        step > start_step
+        and args.max_runtime_minutes > 0
+        and elapsed_minutes >= args.max_runtime_minutes - args.exit_guard_minutes
+    ):
+        print0(f"ChatRL wall-clock guard reached after {elapsed_minutes:.1f} minutes; saving and exiting")
+        if master_process:
+            submit_rl_checkpoint(step - 1, step)
+        stopped_for_time = True
+        break
 
     if step % args.eval_every ==0:
         model.eval()
@@ -301,23 +402,22 @@ for step in range(num_steps):
     })
 
     if master_process and ((step > 0 and step % args.save_every == 0) or step == num_steps - 1):
-        base_dir = get_base_dir()
-        depth = model.config.n_layer
-        output_dirname = args.model_tag if args.model_tag else f"d{depth}"
-        checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
-        model_config_kwargs = model.config.__dict__
-        save_checkpoint(
-            checkpoint_dir,
-            step,
-            model.state_dict(),
-            None,  # note: we don't bother to save the optimizer state
-            {
-                "step": step,
-                "model_config": model_config_kwargs,
-                "user_config": user_config,
-            },
-        )
+        submit_rl_checkpoint(step, step + 1)
         print0(f"✅ Saved model checkpoint to {checkpoint_dir}")
+
+if checkpoint_writer is not None:
+    print0("Waiting for the final ChatRL checkpoint publish to complete...")
+    checkpoint_writer.wait()
+
+if not stopped_for_time and step == num_steps - 1 and master_process:
+    mark_training_complete(
+        checkpoint_dir,
+        step,
+        num_steps - 1,
+        metadata={"model_tag": output_dirname, "phase": "rl"},
+    )
+
+batch_iterator.close()
 
 wandb_run.finish() # wandb run finish
 compute_cleanup()

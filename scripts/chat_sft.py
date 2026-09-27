@@ -7,7 +7,14 @@ import wandb
 import torch
 from nanollm.commons import compute_init, compute_cleanup, print0, DummyWandb, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON, is_ddp_initialized
 from nanollm.tokenizer import get_token_bytes
-from nanollm.checkpoint_manager import save_checkpoint, load_model, load_optimizer_state
+from nanollm.checkpoint_manager import (
+    AsyncCheckpointWriter,
+    find_last_step,
+    load_model,
+    load_optimizer_state,
+    mark_training_complete,
+    save_checkpoint,
+)
 from nanollm.loss_eval import evaluate_bpb
 import torch.distributed as dist
 
@@ -31,6 +38,7 @@ parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (e
 parser.add_argument("--model-tag", type=str, default=None, help="model tag to load from")
 parser.add_argument("--model-step", type=int, default=None, help="model step to load from")
 parser.add_argument("--load-optimizer", type=int, default=1, help="warm-start optimizer from pretrained checkpoint (0=no, 1=yes)")
+parser.add_argument("--resume-from-step", type=str, default=None, help="resume SFT from an integer step or 'latest'")
 # Training horizon
 parser.add_argument("--num-iterations", type=int, default=-1, help="number of optimization steps (-1 = full epoch)")
 # Batch sizes (default: inherit from pretrained checkpoint)
@@ -51,11 +59,17 @@ parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number o
 parser.add_argument("--chatcore-every", type=int, default=200, help="evaluate ChatCORE metric every N steps (-1 = disable)")
 parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="max problems per categorical task for ChatCORE")
 parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max problems per generative task for ChatCORE")
+parser.add_argument("--save-every", type=int, default=200, help="save a resumable checkpoint every N optimizer steps (-1 disables)")
+parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
+parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 disables)")
+parser.add_argument("--exit-guard-minutes", type=float, default=20, help="minutes reserved for the final checkpoint publish")
 # Data mixture
 parser.add_argument("--mmlu-epochs", type=int, default=3, help="number of epochs of MMLU in training mixture (teaches Multiple Choice)")
 parser.add_argument("--gsm8k-epochs", type=int, default=4, help="number of epochs of GSM8K in training mixture (teaches Math and Tool Use)")
 args = parser.parse_args()
 user_config = vars(args).copy()
+if args.max_runtime_minutes > 0 and args.exit_guard_minutes >= args.max_runtime_minutes:
+    parser.error("--exit-guard-minutes must be smaller than --max-runtime-minutes")
 
 
 
@@ -85,7 +99,28 @@ if not HAS_FA3:
     print0("WARNING: Flash Attn 3 not available, using Pytorch SDPA fallback. Training will be less efficient.")
 
 
-model, tokenizer, meta= load_model("base", device, phase = "train", model_tag = args.model_tag, step=args.model_step)
+base_dir=get_base_dir()
+resume_step = None
+if args.resume_from_step is not None:
+    if args.model_tag is None:
+        parser.error("--model-tag is required when resuming SFT")
+    sft_checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", args.model_tag)
+    if args.resume_from_step == "latest":
+        resume_step = find_last_step(sft_checkpoint_dir)
+    else:
+        try:
+            resume_step = int(args.resume_from_step)
+        except ValueError:
+            parser.error("--resume-from-step must be an integer or 'latest'")
+    if resume_step < 0:
+        parser.error("--resume-from-step must be non-negative")
+
+resuming = resume_step is not None
+source = "sft" if resuming else "base"
+source_step = resume_step if resuming else args.model_step
+model, tokenizer, meta= load_model(source, device, phase="train", model_tag=args.model_tag, step=source_step)
+if resuming:
+    print0(f"Resuming SFT from step {resume_step}")
 
 
 pretrain_user_config= meta.get("user_config",{})
@@ -114,6 +149,22 @@ assert args.device_batch_size >0
 assert args.total_batch_size > 0
 assert args.max_seq_len >0
 
+if resuming:
+    for name in ("device_batch_size", "total_batch_size", "max_seq_len"):
+        saved = meta.get(name)
+        current = getattr(args, name)
+        if saved is not None and saved != current:
+            raise ValueError(f"SFT resume changed {name}: checkpoint={saved}, current={current}")
+    saved_config = meta.get("user_config", {})
+    for name in (
+        "num_iterations", "warmup_ratio", "warmdown_ratio", "final_lr_frac",
+        "mmlu_epochs", "gsm8k_epochs",
+    ):
+        saved = saved_config.get(name)
+        current = getattr(args, name)
+        if saved is not None and saved != current:
+            raise ValueError(f"SFT resume changed {name}: checkpoint={saved}, current={current}")
+
 orig_model = model
 model = torch.compile(model, dynamic=False)
 depth = model.config.n_layer
@@ -132,18 +183,22 @@ token_bytes = get_token_bytes(device=device)
 
 optimizer= model.setup_optimizer(unembedding_lr=args.unembedding_lr, embedding_lr=args.embedding_lr, matrix_lr=args.matrix_lr, weight_decay=0.0)
 
-base_dir=get_base_dir()
-
-if args.load_optimizer:
-    optimizer_data=load_optimizer_state("base", device=device, rank=ddp_rank, model_tag= args.model_tag, step=args.model_step)
+if resuming or args.load_optimizer:
+    optimizer_source = "sft" if resuming else "base"
+    optimizer_step = resume_step if resuming else args.model_step
+    optimizer_data=load_optimizer_state(optimizer_source, device=device, rank=ddp_rank, model_tag=args.model_tag, step=optimizer_step)
     if optimizer_data is not None:
         base_lrs= [group['lr'] for group in optimizer.param_groups]
         optimizer.load_state_dict(optimizer_data)
         del optimizer_data
-        for group, base_lr in zip(optimizer.param_groups,base_lrs):
-            group['lr'] = base_lr
+        if not resuming:
+            for group, base_lr in zip(optimizer.param_groups,base_lrs):
+                group['lr'] = base_lr
 
-        print0("Loaded optimizer state from pretrained checkpoint (momentum buffers only, LRs reset)")
+        if resuming:
+            print0("Loaded SFT optimizer state")
+        else:
+            print0("Loaded optimizer state from pretrained checkpoint (momentum buffers only, LRs reset)")
 
     else:
         print0("WARNING: Optimizer checkpoint not found, starting with fresh optimizer (slightly worse)")
@@ -154,12 +209,15 @@ scaler = torch.amp.GradScaler() if COMPUTE_DTYPE ==torch.float16 else None # Pre
 if scaler is not None:
     print0("GradScaler enabled for fp16 training.")
 
-for group in optimizer.param_groups:
-    group["lr"]*=args.init_lr_frac
-    group["initial_lr"] = group["lr"]
+if not resuming:
+    for group in optimizer.param_groups:
+        group["lr"]*=args.init_lr_frac
+        group["initial_lr"] = group["lr"]
 
 assert all(group["lr"] > 0 for group in optimizer.param_groups)
-assert all(group["initial_lr"] == group["lr"] for group in optimizer.param_groups)
+assert all("initial_lr" in group for group in optimizer.param_groups)
+if not resuming:
+    assert all(group["initial_lr"] == group["lr"] for group in optimizer.param_groups)
 
 train_tasks=[
     SmolTalk(split="train"),
@@ -182,7 +240,7 @@ approx_progress =0.0
 current_epoch=1
 
 
-def sft_data_generator_bos_bestfit(split, buffer_size=100):
+def sft_data_generator_bos_bestfit(split, buffer_size=100, resume_state=None, return_state=False):
     global last_step, approx_progress, current_epoch
 
     assert split in {"train", "val"}, "split must be 'train' or 'val'."
@@ -195,11 +253,11 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
 
     bos_token=tokenizer.get_bos_token_id()
 
-    conv_buffer =[]
-    cursor = ddp_rank
-    consumed = ddp_rank
-    epoch =1
-    it =0 # iteration counter
+    conv_buffer = [] if resume_state is None else resume_state["conv_buffer"]
+    cursor = ddp_rank if resume_state is None else resume_state["cursor"]
+    consumed = ddp_rank if resume_state is None else resume_state["consumed"]
+    epoch = 1 if resume_state is None else resume_state["epoch"]
+    it = 0 if resume_state is None else resume_state["it"]
 
     def refill_buffer():
         nonlocal cursor, epoch
@@ -213,6 +271,16 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
                 epoch+=1
 
     while True:
+        # This snapshot describes the state immediately before constructing the
+        # yielded batch. Saving it lets resume regenerate the pending batch
+        # exactly instead of silently skipping it.
+        state_before_batch = {
+            "cursor": cursor,
+            "consumed": consumed,
+            "epoch": epoch,
+            "it": it,
+            "conv_buffer": [(ids.copy(), mask.copy()) for ids, mask in conv_buffer],
+        }
         rows=[]
         masked_rows=[]
         row_lengths=[]
@@ -294,12 +362,16 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
             if content_len<row_capacity:
                 targets[i,content_len-1:] = -1
 
-        yield inputs, targets
+        if return_state:
+            yield inputs, targets, state_before_batch
+        else:
+            yield inputs, targets
 
 
-train_loader = sft_data_generator_bos_bestfit("train")
+resume_data_state = meta.get("sft_data_state") if resuming else None
+train_loader = sft_data_generator_bos_bestfit("train", resume_state=resume_data_state, return_state=True)
 build_val_loader = lambda: sft_data_generator_bos_bestfit("val")
-progress =0
+progress = meta.get("progress", 0) if resuming else 0
 
 
 def get_lr_multiplier(progress):
@@ -319,12 +391,64 @@ def get_muon_momentum(it):
     return momentum
 
 
-x,y=next(train_loader)
-min_val_bpb = float('inf')
-smooth_train_loss=0.0
+x,y,sft_data_state=next(train_loader)
+min_val_bpb = meta.get("min_val_bpb", float('inf')) if resuming else float('inf')
+smooth_train_loss=meta.get("smooth_train_loss", 0.0) if resuming else 0.0
 ema_beta= 0.9
-total_training_time = 0
-step=0
+total_training_time = meta.get("total_training_time", 0) if resuming else 0
+step=meta["step"] if resuming else 0
+val_bpb=meta.get("val_bpb") if resuming else None
+
+output_dirname = args.model_tag if args.model_tag else f"d{depth}"
+checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
+checkpoint_writer = AsyncCheckpointWriter(
+    checkpoint_dir,
+    staging_dir=args.checkpoint_staging_dir,
+    keep_last=2,
+) if master_process and ddp_world_size == 1 else None
+session_started = time.monotonic()
+
+
+def submit_sft_checkpoint():
+    checkpoint_meta = {
+        "step": step,
+        "val_bpb": val_bpb,
+        "min_val_bpb": min_val_bpb,
+        "smooth_train_loss": smooth_train_loss,
+        "total_training_time": total_training_time,
+        "progress": progress,
+        "sft_data_state": sft_data_state,
+        "device_batch_size": args.device_batch_size,
+        "max_seq_len": args.max_seq_len,
+        "total_batch_size": args.total_batch_size,
+        "model_config": {
+            "sequence_len": args.max_seq_len,
+            "vocab_size": tokenizer.get_vocab_size(),
+            "n_layer": depth,
+            "n_head": orig_model.config.n_head,
+            "n_kv_head": orig_model.config.n_kv_head,
+            "n_embed": orig_model.config.n_embed,
+            "window_pattern": orig_model.config.window_pattern,
+        },
+        "user_config": user_config,
+    }
+    if checkpoint_writer is not None:
+        checkpoint_writer.submit(
+            step,
+            orig_model.state_dict(),
+            optimizer.state_dict(),
+            checkpoint_meta,
+            rank=ddp_rank,
+        )
+    else:
+        save_checkpoint(
+            checkpoint_dir,
+            step,
+            orig_model.state_dict(),
+            optimizer.state_dict(),
+            checkpoint_meta,
+            rank=ddp_rank,
+        )
 
 
 while True:
@@ -335,8 +459,16 @@ while True:
         dist.all_reduce(last_step_tensor,op=dist.ReduceOp.MAX)
         last_step=bool(last_step_tensor.item())
 
+    elapsed_minutes = (time.monotonic() - session_started) / 60
+    time_to_exit = (
+        args.max_runtime_minutes > 0
+        and elapsed_minutes >= args.max_runtime_minutes - args.exit_guard_minutes
+    )
+    if time_to_exit:
+        print0(f"SFT wall-clock guard reached after {elapsed_minutes:.1f} minutes; saving and exiting")
 
-    if last_step or (args.eval_every >0 and step % args.eval_every == 0):
+
+    if not time_to_exit and (last_step or (args.eval_every >0 and step % args.eval_every == 0)):
         model.eval()
         val_loader=build_val_loader()
         eval_steps = args.eval_tokens // (args.device_batch_size * args.max_seq_len * ddp_world_size)
@@ -358,7 +490,7 @@ while True:
 
     # chatcore_results={}
 
-    if args.chatcore_every >0 and (last_step or (step>0 and step % args.chatcore_every==0)):
+    if not time_to_exit and args.chatcore_every >0 and (last_step or (step>0 and step % args.chatcore_every==0)):
         model.eval()
         engine= Engine(orig_model,tokenizer)
 
@@ -395,35 +527,17 @@ while True:
         model.train()      
 
 
-    if last_step:
-        output_dirname = args.model_tag if args.model_tag else f"d{depth}"
-        checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
+    periodic_save = (
+        args.save_every > 0
+        and step > 0
+        and (not resuming or step != resume_step)
+        and step % args.save_every == 0
+    )
+    if last_step or time_to_exit or periodic_save:
+        submit_sft_checkpoint()
 
-        save_checkpoint(
-            checkpoint_dir,
-            step,
-            orig_model.state_dict(),
-            optimizer.state_dict(),
-            {
-                "step":step,
-                "val_bpb": val_bpb,
-                "model_config" : {
-                    "sequence_len" : args.max_seq_len,
-                    "vocab_size" : tokenizer.get_vocab_size(),
-                    "n_layer" : depth,
-                    "n_head" : model.config.n_head,
-                    "n_kv_head" : model.config.n_kv_head,
-                    "n_embed" : model.config.n_embed,
-                    "window_pattern" : model.config.window_pattern,
-                },
-                "user_config" : user_config,
-
-            },
-            rank=ddp_rank,
-        )                 
-
-    if last_step:
-        break     
+    if last_step or time_to_exit:
+        break
 
     synchronize()
     t0=time.time()
@@ -437,7 +551,7 @@ while True:
         else:
             loss.backward()
 
-        x,y = next(train_loader)
+        x,y,sft_data_state = next(train_loader)
         progress = max(progress, approx_progress)
 
 
@@ -508,6 +622,18 @@ while True:
 print0(f"Peak Memory usage: {get_max_memory() /1024/1024:.2f}MiB")
 print0(f"Total training time : {total_training_time/60:.2f}m")
 print0(f"Minimum validation bpb: {min_val_bpb:.4f}")
+
+if checkpoint_writer is not None:
+    print0("Waiting for the final SFT checkpoint publish to complete...")
+    checkpoint_writer.wait()
+
+if last_step and master_process:
+    mark_training_complete(
+        checkpoint_dir,
+        step,
+        step,
+        metadata={"model_tag": output_dirname, "phase": "sft"},
+    )
 
 wandb_run.finish()
 compute_cleanup()

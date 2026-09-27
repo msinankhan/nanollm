@@ -16,7 +16,15 @@ from nanollm.flash_attention import backend_report, HAS_FA3, USE_FA3
 from nanollm.dataloader import tokenizing_distributed_data_loader_with_bos_bestfit, tokenizing_distributed_data_loader_with_state_bos_bestfit
 from nanollm.commons import compute_init, compute_cleanup, print0, DummyWandb, print_banner, get_base_dir, autodetect_device_type, get_peak_flops, COMPUTE_DTYPE, COMPUTE_DTYPE_REASON
 from nanollm.tokenizer import get_tokenizer, get_token_bytes    
-from nanollm.checkpoint_manager import AsyncCheckpointWriter, save_checkpoint, load_checkpoint
+from nanollm.checkpoint_manager import (
+    AsyncCheckpointWriter,
+    clear_training_complete,
+    find_last_step,
+    load_checkpoint,
+    mark_training_complete,
+    read_training_complete,
+    save_checkpoint,
+)
 from nanollm.loss_eval import evaluate_bpb
 from nanollm.engine import Engine
 from scripts.base_eval import evaluate_core
@@ -40,11 +48,11 @@ parser.add_argument("--depth", type=int, default=20, help="depth of the Transfor
 parser.add_argument("--aspect-ratio", type=int, default=64, help="model_dim = depth * aspect_ratio")
 parser.add_argument("--head-dim", type=int, default=128, help="target head dimension for attention")
 parser.add_argument("--max-seq-len", type=int, default=2048, help="max context length")
-parser.add_argument("--window-pattern", type=str, default="L", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSL')")
+parser.add_argument("--window-pattern", type=str, default="SSSL", help="sliding window pattern tiled across layers: L=full, S=half context (e.g. 'SSSL')")
 # Training horizon (only one used, in order of precedence)
 parser.add_argument("--num-iterations", type=int, default=-1, help="explicit number of optimization steps (-1 = disable)")
 parser.add_argument("--target-flops", type=float, default=-1.0, help="calculate num_iterations to reach target_flops (-1 = disable)")
-parser.add_argument("--target-params-data-ratio", type=float, default=20, help="calculate num_iterations to maintain data:param ratio (Chinchilla=20, -1 = disable)")
+parser.add_argument("--target-params-data-ratio", type=float, default=12, help="calculate num_iterations to maintain data:param ratio (nanochat reference=12, -1 = disable)")
 
 # Optimization
 parser.add_argument("--device-batch-size", type=int, default=32, help="per-device batch size. good number to reduce to 16,8,4,... if you OOM on VRAM.")
@@ -61,7 +69,7 @@ parser.add_argument("--scalar-lr", type=float, default=0.5, help="learning rate 
 parser.add_argument("--warmdown-ratio", type=float, default=0.65, help="ratio of iterations for LR warmdown")
 parser.add_argument("--warmup-steps", type=int, default=40, help="number of steps for LR warmup")
 parser.add_argument("--final-lr-frac", type=float, default=0.05, help="final LR as fraction of initial LR")
-parser.add_argument("--resume-from-step", type=int, default=-1, help="resume training from this step (-1 = disable)")
+parser.add_argument("--resume-from-step", type=str, default=None, help="resume from an integer step or 'latest' (default: start fresh)")
 # Evaluation
 parser.add_argument("--eval-every", type=int, default=-1, help="evaluate val bpb every N steps (-1 = disable)")
 parser.add_argument("--eval-tokens", type=int, default=40*524288, help="number of tokens to evaluate val loss on")
@@ -179,13 +187,41 @@ model.init_weights() # 3) All tensors get initialized
 base_dir=get_base_dir()
 output_dirname = args.model_tag if args.model_tag else f"d{args.depth}"
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+if args.resume_from_step is not None:
+    if args.resume_from_step == "latest":
+        args.resume_from_step = find_last_step(checkpoint_dir)
+    else:
+        try:
+            args.resume_from_step = int(args.resume_from_step)
+        except ValueError:
+            parser.error("--resume-from-step must be an integer or 'latest'")
+    if args.resume_from_step < 0:
+        parser.error("--resume-from-step must be non-negative")
+else:
+    completion = read_training_complete(checkpoint_dir) if os.path.isdir(checkpoint_dir) else None
+    if completion is not None:
+        parser.error(
+            f"Training is already marked complete at step {completion['step']} in {checkpoint_dir}; "
+            "use a different --model-tag to start another run"
+        )
+    if os.path.isdir(checkpoint_dir):
+        try:
+            existing_step = find_last_step(checkpoint_dir)
+        except FileNotFoundError:
+            existing_step = None
+        if existing_step is not None:
+            parser.error(
+                f"A partial run already has checkpoint step {existing_step} in {checkpoint_dir}; "
+                "use --resume-from-step=latest or choose a different --model-tag"
+            )
+    clear_training_complete(checkpoint_dir)
 checkpoint_writer = AsyncCheckpointWriter(
     checkpoint_dir, staging_dir=args.checkpoint_staging_dir, keep_last=args.keep_checkpoints
 ) if master_process and ddp_world_size == 1 else None
 session_started = time.monotonic()
 last_checkpoint_started = session_started
 has_saved_this_session = False
-resuming = args.resume_from_step != -1
+resuming = args.resume_from_step is not None
 
 if resuming:
     print0(f"Resuming optimization from step: {args.resume_from_step}")
@@ -502,6 +538,18 @@ print0(f"Total number of training tokens: {total_tokens:,}")
 print0(f"Tokens: Scaling params ratio: {total_batch_size* num_iterations/num_sclaing_params:.2f}")
 print0(f"Total training FLOPs estimate  {num_flops_per_token * total_tokens:e}")
 
+if resuming:
+    saved_total_batch = meta_data.get("total_batch_size")
+    saved_num_iterations = meta_data.get("num_iterations")
+    if saved_total_batch is not None and saved_total_batch != total_batch_size:
+        raise ValueError(
+            f"Resume configuration changed total batch size: checkpoint={saved_total_batch}, current={total_batch_size}"
+        )
+    if saved_num_iterations is not None and saved_num_iterations != num_iterations:
+        raise ValueError(
+            f"Resume configuration changed training horizon: checkpoint={saved_num_iterations}, current={num_iterations}"
+        )
+
                                 
 def get_lr_multiplier(it):
     warmp_iters = args.warmup_steps
@@ -628,7 +676,7 @@ while True:
         model.train()
 
     step_checkpoint_due = (
-        step > 0 and step != args.resume_from_step
+        step > 0 and (not resuming or step != args.resume_from_step)
         and args.save_every > 0 and step % args.save_every == 0
     )
     save_due = last_step or time_to_exit or time_checkpoint_due or step_checkpoint_due
@@ -641,6 +689,8 @@ while True:
             "device_batch_size": args.device_batch_size,
             "max_seq_len": args.max_seq_len,
             "total_batch_size": total_batch_size,
+            "num_iterations": num_iterations,
+            "target_tokens": target_tokens,
             "dataloader_state_dict": dataloader_state_dict,
             "loop_state": {
                 "min_val_bpb": min_val_bpb,
@@ -791,6 +841,14 @@ while True:
 if checkpoint_writer is not None:
     print0("Waiting for the final checkpoint publish to complete...")
     checkpoint_writer.wait()
+
+if last_step and master_process:
+    mark_training_complete(
+        checkpoint_dir,
+        step,
+        num_iterations,
+        metadata={"model_tag": output_dirname, "phase": "base"},
+    )
 
 print0(f"Peak memory usage: {get_max_memory()/1024/1024:.2f}MiB")
 print0(f"Total training time: {total_training_time/60:.2f}m")
