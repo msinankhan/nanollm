@@ -48,12 +48,15 @@ def _try_fa2():
 def _try_fa2_hub():
     """Prebuilt FlashAttention 2 binaries, including sm_120."""
     from kernels import get_kernel
-    module = get_kernel("kernels-community/flash-attn2", version=2)
+    # HF kernel-package version 3 includes the torch 2.10 / CUDA 12.8 Linux
+    # build and declares sm_120. This is still FlashAttention 2; `version`
+    # selects the packaging revision, not the FlashAttention algorithm.
+    module = get_kernel("kernels-community/flash-attn2", version=3)
     interface = getattr(module, "flash_attn_interface", module)
     func = interface.flash_attn_func
     kvcache = interface.flash_attn_with_kvcache
     _smoke_test(func, "fa2_hub")
-    return ((func, kvcache), f"kernels-community/flash-attn2 v2 on {CAP_STR}")
+    return ((func, kvcache), f"kernels-community/flash-attn2 package v3 on {CAP_STR}")
 
 
 def _try_fa3_hub():
