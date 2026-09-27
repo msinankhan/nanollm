@@ -154,6 +154,7 @@ case "$ACTION" in
             --eval-every=-1 \
             --core-metric-every=-1 \
             --sample-every=-1 \
+            --no-save-checkpoints \
             --save-every-minutes=-1
         ;;
     pretrain)

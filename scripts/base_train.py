@@ -79,6 +79,7 @@ parser.add_argument("--sample-every", type=int, default=2000, help="sample from 
 parser.add_argument("--save-every", type=int, default=-1, help="also save every N steps (-1 = time-based only)")
 parser.add_argument("--save-every-minutes", type=float, default=60, help="publish a durable checkpoint at least this often (-1 = disable)")
 parser.add_argument("--first-save-minutes", type=float, default=15, help="time to the first durable checkpoint")
+parser.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=True, help="write checkpoints and a completion marker (disable for disposable preflight runs)")
 parser.add_argument("--keep-checkpoints", type=int, default=2, help="number of completed checkpoints to retain")
 parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
 parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 = disable)")
@@ -187,6 +188,8 @@ model.init_weights() # 3) All tensors get initialized
 base_dir=get_base_dir()
 output_dirname = args.model_tag if args.model_tag else f"d{args.depth}"
 checkpoint_dir = os.path.join(base_dir, "base_checkpoints", output_dirname)
+if not args.save_checkpoints and args.resume_from_step is not None:
+    parser.error("--no-save-checkpoints cannot be combined with --resume-from-step")
 if args.resume_from_step is not None:
     if args.resume_from_step == "latest":
         args.resume_from_step = find_last_step(checkpoint_dir)
@@ -197,7 +200,7 @@ if args.resume_from_step is not None:
             parser.error("--resume-from-step must be an integer or 'latest'")
     if args.resume_from_step < 0:
         parser.error("--resume-from-step must be non-negative")
-else:
+elif args.save_checkpoints:
     completion = read_training_complete(checkpoint_dir) if os.path.isdir(checkpoint_dir) else None
     if completion is not None:
         parser.error(
@@ -217,7 +220,7 @@ else:
     clear_training_complete(checkpoint_dir)
 checkpoint_writer = AsyncCheckpointWriter(
     checkpoint_dir, staging_dir=args.checkpoint_staging_dir, keep_last=args.keep_checkpoints
-) if master_process and ddp_world_size == 1 else None
+) if args.save_checkpoints and master_process and ddp_world_size == 1 else None
 session_started = time.monotonic()
 last_checkpoint_started = session_started
 has_saved_this_session = False
@@ -679,7 +682,7 @@ while True:
         step > 0 and (not resuming or step != args.resume_from_step)
         and args.save_every > 0 and step % args.save_every == 0
     )
-    save_due = last_step or time_to_exit or time_checkpoint_due or step_checkpoint_due
+    save_due = args.save_checkpoints and (last_step or time_to_exit or time_checkpoint_due or step_checkpoint_due)
     if save_due:
         checkpoint_meta = {
             "step": step,
@@ -842,7 +845,7 @@ if checkpoint_writer is not None:
     print0("Waiting for the final checkpoint publish to complete...")
     checkpoint_writer.wait()
 
-if last_step and master_process:
+if args.save_checkpoints and last_step and master_process:
     mark_training_complete(
         checkpoint_dir,
         step,
