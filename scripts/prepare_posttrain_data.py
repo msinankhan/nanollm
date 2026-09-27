@@ -1,14 +1,31 @@
 """Download every evaluation, SFT, and RL artifact before allocating a GPU."""
 
 import os
+import shutil
+import tempfile
+import zipfile
 
 from nanollm.commons import download_file_with_lock, get_base_dir
-from scripts.base_eval import EVAL_BUNDLE_URL, place_eval_bundle
 from tasks.arc import ARC
 from tasks.gsm8k import GSM8K
 from tasks.humaneval import HumanEval
 from tasks.mmlu import MMLU
 from tasks.smoltalk import SmolTalk
+
+
+EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
+
+
+def place_eval_bundle(file_path):
+    """Extract the base-model evaluation bundle without importing GPU code."""
+    eval_bundle_dir = os.path.join(get_base_dir(), "eval_bundle")
+    if os.path.isdir(eval_bundle_dir):
+        return
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(file_path, "r") as zip_ref:
+            zip_ref.extractall(tmpdir)
+        shutil.move(os.path.join(tmpdir, "eval_bundle"), eval_bundle_dir)
+    print(f"Eval bundle placed at {eval_bundle_dir}")
 
 
 def main():
