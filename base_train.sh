@@ -121,7 +121,7 @@ case "$ACTION" in
         if [[ ! -f "$BASE_DIR/tokenizer_dir/tokenizer.pkl" ]]; then
             NANOLLM_DATA_DIR="$PERSISTENT_DATA_DIR" python -m scripts.tok_train --vocab_size "$TOKENIZER_VOCAB_SIZE"
         fi
-        python -m scripts.tok_eval
+        NANOLLM_DATA_DIR="$PERSISTENT_DATA_DIR" python -m scripts.tok_eval
         python -m scripts.prepare_posttrain_data
         NANOLLM_DATA_DIR="$PERSISTENT_DATA_DIR" verify_assets
         ;;
