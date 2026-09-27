@@ -177,7 +177,10 @@ def compute_init(device_type='cuda'):
     
 
     if device_type=='cuda':
-        torch.backends.cuda.matmul.fp32_precision='tf32'
+        # PyTorch 2.10 Inductor still queries the legacy flag while lowering
+        # compiled BMMs. Setting the newer fp32_precision property first makes
+        # that internal query fail with a mixed-API error.
+        torch.backends.cuda.matmul.allow_tf32 = True
 
 
     ddp_requested, ddp_rank,ddp_local_rank,ddp_world_size= get_dist_info()
