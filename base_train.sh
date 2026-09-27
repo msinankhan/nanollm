@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Colab CLI SSH sessions do not always include the directory containing the
+# host-provided NVIDIA driver libraries. Without it, nvidia-smi cannot load
+# NVML and CUDA-enabled PyTorch reports that no GPU is available.
+if [[ -d /usr/lib64-nvidia ]]; then
+    export LD_LIBRARY_PATH="/usr/lib64-nvidia${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 # Single-GPU Colab G4 reference pipeline. Override any value by exporting it
 # before invoking this script, e.g. MODEL_TAG=my-test ./base_train.sh preflight.
 # Full local-machine Colab CLI setup and recovery commands are documented in
