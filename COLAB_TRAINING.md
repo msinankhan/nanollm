@@ -96,9 +96,18 @@ git status --short
 # The prepare action uses the CPU PyTorch dependency set.
 python -m pip install --upgrade uv
 ./base_train.sh prepare
+./base_train.sh archive-data
 ./base_train.sh status
 exit
 ```
+
+`archive-data` writes a temporary ZIP on the VM's local disk, verifies every
+member and CRC, uploads it under a temporary Drive name, verifies its SHA-256,
+atomically publishes the archive plus a manifest, and only
+then deletes the 170 original Drive shards. It is safe to interrupt before the
+deletion message: the original shards remain authoritative. The command uses
+Deflate level 1 because Parquet is already compressed and CPU time matters more
+than attempting maximum ZIP compression.
 
 Back on the local machine, stop the CPU runtime and verify it was released:
 
@@ -109,11 +118,15 @@ colab --auth oauth2 usage
 ```
 
 Do not continue until Drive contains the tokenizer, task data, evaluation
-bundle, and all 170 FineWeb-Edu shards under:
+bundle, and the verified FineWeb-Edu archive and manifest under:
 
 ```text
 /content/drive/MyDrive/nanollm-runs/reference-d24-r12/
 ```
+
+The archive files are `static_data/fineweb-edu-170.zip` and
+`static_data/fineweb-edu-170.zip.manifest.json`. The individual shards are
+removed only after these files pass verification.
 
 ### C. Allocate and inspect the G4 runtime
 
@@ -139,8 +152,8 @@ git status --short
 
 python -m pip install --upgrade uv
 
-# Install the GPU environment, copy persistent shards to local NVMe, and verify
-# the exact shard count and tokenizer vocabulary before training.
+# Install the GPU environment, copy the verified archive to local NVMe, extract
+# all shards there, and verify the shard count and tokenizer before training.
 ./base_train.sh hydrate
 
 # Inspect the actual allocation rather than assuming the requested GPU arrived.

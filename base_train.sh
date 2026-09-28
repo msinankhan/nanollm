@@ -20,6 +20,8 @@ WANDB_RUN_ID="${WANDB_RUN_ID:-$MODEL_TAG}"
 BASE_DIR="${NANOLLM_BASE_DIR:-/content/drive/MyDrive/nanollm-runs/reference-d24-r12}"
 DATA_DIR="${NANOLLM_DATA_DIR:-/content/nanollm-data}"
 PERSISTENT_DATA_DIR="${NANOLLM_PERSISTENT_DATA_DIR:-$BASE_DIR/static_data/fineweb-edu-170}"
+PERSISTENT_DATA_ARCHIVE="${NANOLLM_PERSISTENT_DATA_ARCHIVE:-${PERSISTENT_DATA_DIR%/}.zip}"
+PERSISTENT_DATA_ARCHIVE_MANIFEST="${NANOLLM_PERSISTENT_DATA_ARCHIVE_MANIFEST:-${PERSISTENT_DATA_ARCHIVE}.manifest.json}"
 STAGING_DIR="${NANOLLM_CHECKPOINT_STAGING_DIR:-/content/nanollm-checkpoint-staging}"
 DEPTH="${DEPTH:-24}"
 DATA_RATIO="${DATA_RATIO:-12}"
@@ -136,11 +138,36 @@ case "$ACTION" in
         python -m scripts.prepare_posttrain_data
         NANOLLM_DATA_DIR="$PERSISTENT_DATA_DIR" verify_assets
         ;;
+    archive-data)
+        ensure_environment cpu
+        python -m scripts.data_archive pack \
+            --source-dir "$PERSISTENT_DATA_DIR" \
+            --archive "$PERSISTENT_DATA_ARCHIVE" \
+            --manifest "$PERSISTENT_DATA_ARCHIVE_MANIFEST" \
+            --expected-shards "$DATA_SHARDS" \
+            --compression-level 1 \
+            --staging-dir /content \
+            --delete-source
+        ;;
     hydrate)
         ensure_environment
-        [[ -d "$PERSISTENT_DATA_DIR" ]] || die "Persistent dataset not found: $PERSISTENT_DATA_DIR"
         mkdir -p "$DATA_DIR"
-        cp -an "$PERSISTENT_DATA_DIR/." "$DATA_DIR/"
+        if [[ -f "$PERSISTENT_DATA_ARCHIVE" && -f "$PERSISTENT_DATA_ARCHIVE_MANIFEST" ]]; then
+            archive_stage="$(mktemp -d /content/nanollm-data-archive.XXXXXX)"
+            trap 'rm -rf -- "$archive_stage"' EXIT
+            cp "$PERSISTENT_DATA_ARCHIVE" "$archive_stage/data.zip"
+            cp "$PERSISTENT_DATA_ARCHIVE_MANIFEST" "$archive_stage/data.zip.manifest.json"
+            python -m scripts.data_archive extract \
+                --archive "$archive_stage/data.zip" \
+                --manifest "$archive_stage/data.zip.manifest.json" \
+                --output-dir "$DATA_DIR" \
+                --expected-shards "$DATA_SHARDS"
+            rm -rf -- "$archive_stage"
+            trap - EXIT
+        else
+            [[ -d "$PERSISTENT_DATA_DIR" ]] || die "Persistent dataset archive and shard directory are both missing"
+            cp -an "$PERSISTENT_DATA_DIR/." "$DATA_DIR/"
+        fi
         verify_assets
         ;;
     preflight)
@@ -264,6 +291,6 @@ case "$ACTION" in
         [[ -f "$RL_COMPLETE_MARKER" ]] && echo "ChatRL status:   complete" || echo "ChatRL status:   not complete"
         ;;
     *)
-        die "Unknown action '$ACTION'. Use: prepare | hydrate | preflight | pretrain | posttrain | status"
+        die "Unknown action '$ACTION'. Use: prepare | archive-data | hydrate | preflight | pretrain | posttrain | status"
         ;;
 esac
