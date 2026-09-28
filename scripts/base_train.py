@@ -38,6 +38,7 @@ parser = argparse.ArgumentParser(description="Pretrain base model")
 
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--wandb-run-id", type=str, default=None, help="stable W&B run ID used to resume logging across sessions")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # FP8 training
@@ -119,7 +120,15 @@ print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 
 use_dummy_wandb = args.run =="dummy" or not master_process
-wandb_run=DummyWandb() if use_dummy_wandb else wandb.init(project="nanollm", name=args.run,config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
+    project="nanollm",
+    name=args.run,
+    id=args.wandb_run_id,
+    resume="allow" if args.wandb_run_id else None,
+    config=user_config,
+)
+wandb_run.define_metric("step")
+wandb_run.define_metric("*", step_metric="step")
 
 # if HAS_FA3:
 #     print0("Using FA3.")

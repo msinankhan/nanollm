@@ -212,6 +212,8 @@ class DummyWandb:
         pass
     def log(self, *args, **kwargs):
         pass
+    def define_metric(self, *args, **kwargs):
+        pass
     def finish(self):
         pass
 

@@ -21,6 +21,7 @@ from tasks.gsm8k import GSM8K
 parser = argparse.ArgumentParser(description="Reinforcement learning on GSM8K")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
+parser.add_argument("--wandb-run-id", type=str, default=None, help="stable W&B run ID used to resume logging across sessions")
 # Runtime
 parser.add_argument("--device-type", type=str, default="", help="cuda|cpu|mps (empty = autodetect)")
 # Model loading
@@ -62,7 +63,15 @@ master_process = ddp_rank ==0
 
 
 use_dummy_wandb = args.run == "dummy" or not master_process
-wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanollm-rl", name=args.run, config=user_config)
+wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(
+    project="nanollm-rl",
+    name=args.run,
+    id=args.wandb_run_id,
+    resume="allow" if args.wandb_run_id else None,
+    config=user_config,
+)
+wandb_run.define_metric("step")
+wandb_run.define_metric("*", step_metric="step")
 
 base_dir = get_base_dir()
 resume_checkpoint_step = None

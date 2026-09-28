@@ -16,6 +16,7 @@ fi
 ACTION="${1:-status}"
 MODEL_TAG="${MODEL_TAG:-d24-r12-bf16-reference}"
 WANDB_RUN="${WANDB_RUN:-$MODEL_TAG}"
+WANDB_RUN_ID="${WANDB_RUN_ID:-$MODEL_TAG}"
 BASE_DIR="${NANOLLM_BASE_DIR:-/content/drive/MyDrive/nanollm-runs/reference-d24-r12}"
 DATA_DIR="${NANOLLM_DATA_DIR:-/content/nanollm-data}"
 PERSISTENT_DATA_DIR="${NANOLLM_PERSISTENT_DATA_DIR:-$BASE_DIR/static_data/fineweb-edu-170}"
@@ -32,6 +33,7 @@ RL_SAVE_EVERY="${RL_SAVE_EVERY:-20}"
 KEEP_CHECKPOINTS="${KEEP_CHECKPOINTS:-3}"
 TOKENIZER_VOCAB_SIZE="${TOKENIZER_VOCAB_SIZE:-32768}"
 DATA_SHARDS="${DATA_SHARDS:-170}"
+BASE_EVAL_EVERY="${BASE_EVAL_EVERY:-500}"
 
 export NANOLLM_BASE_DIR="$BASE_DIR"
 export NANOLLM_DATA_DIR="$DATA_DIR"
@@ -112,6 +114,8 @@ base_train_args=(
     --total-batch-size="$TOTAL_BATCH_SIZE"
     --model-tag="$MODEL_TAG"
     --run="$WANDB_RUN"
+    --wandb-run-id="$WANDB_RUN_ID"
+    --eval-every="$BASE_EVAL_EVERY"
     --checkpoint-staging-dir="$STAGING_DIR"
     --save-every-minutes="$SAVE_EVERY_MINUTES"
     --first-save-minutes=15
@@ -194,6 +198,7 @@ case "$ACTION" in
             sft_args=(
                 --model-tag "$MODEL_TAG"
                 --run "${WANDB_RUN}-sft"
+                --wandb-run-id "${WANDB_RUN_ID}-sft"
                 --save-every "$SFT_SAVE_EVERY"
                 --checkpoint-staging-dir "$STAGING_DIR/sft"
                 --max-runtime-minutes "$MAX_RUNTIME_MINUTES"
@@ -221,6 +226,7 @@ case "$ACTION" in
             rl_args=(
                 --model-tag "$MODEL_TAG"
                 --run "${WANDB_RUN}-rl"
+                --wandb-run-id "${WANDB_RUN_ID}-rl"
                 --save-every "$RL_SAVE_EVERY"
                 --checkpoint-staging-dir "$STAGING_DIR/rl"
                 --max-runtime-minutes "$MAX_RUNTIME_MINUTES"

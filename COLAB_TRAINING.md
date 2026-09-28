@@ -158,6 +158,9 @@ PY
 # in the repository or command line. Skip this only if WANDB_RUN=dummy.
 .venv/bin/wandb login
 
+# Confirm that this runtime can see the account selected during login.
+.venv/bin/wandb status
+
 ./base_train.sh status
 ./base_train.sh preflight
 ```
@@ -313,6 +316,15 @@ with status 75 when the current Colab session ends safely but the complete
 training horizon has not yet been reached. Rehydrate a new runtime and execute
 the same command again.
 
+Base validation BPB is measured every 500 optimizer steps by default. Override
+this with `BASE_EVAL_EVERY`, or set it to `-1` to disable periodic validation.
+
+The launcher also assigns deterministic W&B run IDs derived from `MODEL_TAG`.
+Every resumed Colab session therefore appends to the original base, SFT, or RL
+run instead of creating another graph. `WANDB_RUN` controls the display name;
+`WANDB_RUN_ID` controls the persistent identity. Do not change either identity
+while resuming an existing training stage.
+
 The post-training phase is unlocked only after
 `base_checkpoints/<model-tag>/training.complete.json` exists and validates its
 referenced checkpoint.
@@ -351,7 +363,7 @@ buffer before the pending batch. For ChatRL, it includes the optimizer,
 All important settings are environment overrides. For example:
 
 ```bash
-WANDB_RUN=d24-reference DEVICE_BATCH_SIZE=16 ./base_train.sh pretrain
+WANDB_RUN=d24-reference WANDB_RUN_ID=d24-reference DEVICE_BATCH_SIZE=16 ./base_train.sh pretrain
 ```
 
 Never change depth, token ratio, vocabulary, attention pattern, global batch,
