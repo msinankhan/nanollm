@@ -332,6 +332,19 @@ the same command again.
 Base validation BPB is measured every 500 optimizer steps by default. Override
 this with `BASE_EVAL_EVERY`, or set it to `-1` to disable periodic validation.
 
+Mounted Google Drive sends ordinary filesystem deletions to Drive Trash, which
+does not immediately reclaim quota. The launcher therefore defaults to
+`KEEP_CHECKPOINTS=0` and never prunes persistent checkpoints automatically.
+Base checkpoints default to a first save after 240 minutes and subsequent saves
+every 480 minutes. At a session boundary, retain the newest validated
+checkpoint, remove older ones deliberately in the Drive UI, and empty Trash
+before allocating the next GPU runtime. A positive `KEEP_CHECKPOINTS` value is
+not recommended when the checkpoint directory is on mounted Drive.
+
+CORE evaluation remains configurable with `BASE_CORE_METRIC_EVERY`; use `-1`
+temporarily if the eval bundle is unavailable. `PYTHONUNBUFFERED=1` is exported
+so logs piped through `tee` remain live.
+
 The launcher also assigns deterministic W&B run IDs derived from `MODEL_TAG`.
 Every resumed Colab session therefore appends to the original base, SFT, or RL
 run instead of creating another graph. `WANDB_RUN` controls the display name;

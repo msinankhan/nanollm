@@ -61,6 +61,7 @@ parser.add_argument("--chatcore-every", type=int, default=200, help="evaluate Ch
 parser.add_argument("--chatcore-max-cat", type=int, default=-1, help="max problems per categorical task for ChatCORE")
 parser.add_argument("--chatcore-max-sample", type=int, default=24, help="max problems per generative task for ChatCORE")
 parser.add_argument("--save-every", type=int, default=200, help="save a resumable checkpoint every N optimizer steps (-1 disables)")
+parser.add_argument("--keep-checkpoints", type=int, default=0, help="completed checkpoints to retain by deleting older files (0 = never delete automatically)")
 parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
 parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 disables)")
 parser.add_argument("--exit-guard-minutes", type=float, default=20, help="minutes reserved for the final checkpoint publish")
@@ -413,7 +414,7 @@ checkpoint_dir = os.path.join(base_dir, "chatsft_checkpoints", output_dirname)
 checkpoint_writer = AsyncCheckpointWriter(
     checkpoint_dir,
     staging_dir=args.checkpoint_staging_dir,
-    keep_last=2,
+    keep_last=args.keep_checkpoints,
 ) if master_process and ddp_world_size == 1 else None
 session_started = time.monotonic()
 

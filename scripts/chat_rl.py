@@ -48,6 +48,7 @@ parser.add_argument("--init-lr-frac", type=float, default=0.05, help="initial LR
 parser.add_argument("--eval-every", type=int, default=60, help="evaluate pass@k every N steps")
 parser.add_argument("--eval-examples", type=int, default=400, help="number of examples for pass@k evaluation")
 parser.add_argument("--save-every", type=int, default=60, help="save checkpoint every N steps")
+parser.add_argument("--keep-checkpoints", type=int, default=0, help="completed checkpoints to retain by deleting older files (0 = never delete automatically)")
 parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
 parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 disables)")
 parser.add_argument("--exit-guard-minutes", type=float, default=20, help="minutes reserved for the final checkpoint publish")
@@ -281,7 +282,7 @@ checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", output_dirname)
 checkpoint_writer = AsyncCheckpointWriter(
     checkpoint_dir,
     staging_dir=args.checkpoint_staging_dir,
-    keep_last=2,
+    keep_last=args.keep_checkpoints,
 ) if master_process and ddp_world_size == 1 else None
 session_started = time.monotonic()
 stopped_for_time = False

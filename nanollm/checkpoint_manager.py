@@ -8,6 +8,7 @@ import hashlib
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 
 from nanollm.tokenizer import get_tokenizer
@@ -199,14 +200,24 @@ class AsyncCheckpointWriter:
 
     def submit(self, step, model_data, optimizer_data, meta_data, rank=0):
         self.wait()
+        started = time.monotonic()
         bundle_dir, manifest = _write_checkpoint_bundle(
             self.staging_dir, step, model_data, optimizer_data, meta_data, rank
         )
-        logger.info(f"Validated local checkpoint step {step}; publishing in background")
+        stage_seconds = time.monotonic() - started
+        logger.info(
+            f"Validated local checkpoint step {step} in {stage_seconds:.1f}s; "
+            "publishing in background"
+        )
         def publish():
+            publish_started = time.monotonic()
             try:
                 _publish_checkpoint_bundle(
                     bundle_dir, self.checkpoint_dir, manifest, self.keep_last
+                )
+                logger.info(
+                    f"Background publish for checkpoint step {step} took "
+                    f"{time.monotonic() - publish_started:.1f}s"
                 )
             except Exception as exc:
                 self._error = exc

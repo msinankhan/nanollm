@@ -81,7 +81,7 @@ parser.add_argument("--save-every", type=int, default=-1, help="also save every 
 parser.add_argument("--save-every-minutes", type=float, default=60, help="publish a durable checkpoint at least this often (-1 = disable)")
 parser.add_argument("--first-save-minutes", type=float, default=15, help="time to the first durable checkpoint")
 parser.add_argument("--save-checkpoints", action=argparse.BooleanOptionalAction, default=True, help="write checkpoints and a completion marker (disable for disposable preflight runs)")
-parser.add_argument("--keep-checkpoints", type=int, default=2, help="number of completed checkpoints to retain")
+parser.add_argument("--keep-checkpoints", type=int, default=0, help="completed checkpoints to retain by deleting older files (0 = never delete automatically)")
 parser.add_argument("--checkpoint-staging-dir", type=str, default=None, help="fast local directory used before background persistence")
 parser.add_argument("--max-runtime-minutes", type=float, default=-1, help="gracefully stop before this session duration (-1 = disable)")
 parser.add_argument("--exit-guard-minutes", type=float, default=20, help="minutes reserved for the final checkpoint upload")
