@@ -128,6 +128,16 @@ The archive files are `static_data/fineweb-edu-170.zip` and
 `static_data/fineweb-edu-170.zip.manifest.json`. The individual shards are
 removed only after these files pass verification.
 
+If the persistent archive is accidentally removed while a live VM still has
+all extracted shards, recover it before releasing that VM:
+
+```bash
+./base_train.sh archive-local-data
+```
+
+This creates and verifies the same persistent archive from
+`/content/nanollm-data` without deleting the VM-local shards.
+
 ### C. Allocate and inspect the G4 runtime
 
 Run locally only when you are ready for compute-unit consumption to begin:

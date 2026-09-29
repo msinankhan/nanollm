@@ -153,6 +153,17 @@ case "$ACTION" in
             --staging-dir /content \
             --delete-source
         ;;
+    archive-local-data)
+        ensure_environment
+        NANOLLM_DATA_DIR="$DATA_DIR" verify_assets
+        python -m scripts.data_archive pack \
+            --source-dir "$DATA_DIR" \
+            --archive "$PERSISTENT_DATA_ARCHIVE" \
+            --manifest "$PERSISTENT_DATA_ARCHIVE_MANIFEST" \
+            --expected-shards "$DATA_SHARDS" \
+            --compression-level 1 \
+            --staging-dir /content
+        ;;
     hydrate)
         ensure_environment
         mkdir -p "$DATA_DIR"
@@ -297,6 +308,6 @@ case "$ACTION" in
         [[ -f "$RL_COMPLETE_MARKER" ]] && echo "ChatRL status:   complete" || echo "ChatRL status:   not complete"
         ;;
     *)
-        die "Unknown action '$ACTION'. Use: prepare | archive-data | hydrate | preflight | pretrain | posttrain | status"
+        die "Unknown action '$ACTION'. Use: prepare | archive-data | archive-local-data | hydrate | preflight | pretrain | posttrain | status"
         ;;
 esac
