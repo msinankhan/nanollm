@@ -17,14 +17,16 @@ EVAL_BUNDLE_URL = "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundl
 
 
 def place_eval_bundle(file_path):
-    """Extract the base-model evaluation bundle without importing GPU code."""
+    """Extract or repair the base-model evaluation bundle without GPU imports."""
     eval_bundle_dir = os.path.join(get_base_dir(), "eval_bundle")
-    if os.path.isdir(eval_bundle_dir):
-        return
     with tempfile.TemporaryDirectory() as tmpdir:
         with zipfile.ZipFile(file_path, "r") as zip_ref:
             zip_ref.extractall(tmpdir)
-        shutil.move(os.path.join(tmpdir, "eval_bundle"), eval_bundle_dir)
+        shutil.copytree(
+            os.path.join(tmpdir, "eval_bundle"),
+            eval_bundle_dir,
+            dirs_exist_ok=True,
+        )
     print(f"Eval bundle placed at {eval_bundle_dir}")
 
 
@@ -34,8 +36,8 @@ def main():
         "eval_bundle.zip",
         postprocess_fn=place_eval_bundle,
     )
-    if not os.path.isdir(os.path.join(get_base_dir(), "eval_bundle")):
-        place_eval_bundle(bundle_path)
+    # Always merge the bundle so a partially deleted directory is repaired.
+    place_eval_bundle(bundle_path)
 
     datasets = [
         SmolTalk(split="train"),

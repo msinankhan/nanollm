@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import shutil
 import urllib.request
 
 import numpy as np
@@ -37,28 +38,46 @@ def load_hub_dataset( repo_id, subset= "default", split= "train"):
 
     manifest_path=os.path.join(shards_dir, "manifest.json")
 
-    if not os.path.exists(manifest_path):
-        os.makedirs(shards_dir, exist_ok=True)
-        with FileLock(manifest_path + ".lock"):
+    os.makedirs(shards_dir, exist_ok=True)
+    with FileLock(manifest_path + ".lock"):
+        filenames = None
+        if os.path.exists(manifest_path):
+            with open(manifest_path, "r") as f:
+                filenames = json.load(f)
 
-            if not os.path.exists(manifest_path):
-                listing_url = f"https://huggingface.co/api/datasets/{repo_id}/parquet/{subset}/{split}"
-
-                with urllib.request.urlopen(listing_url) as response:
-                    shard_urls = json.loads(response.read())
-
-                filenames = []
-
-                for shard_index,shard_url in enumerate(shard_urls):
-                    filename=f"{shard_index:05d}.parquet"
-                    print(f"Downloading {shard_url}...")
-                    with urllib.request.urlopen(shard_url) as response:
-                        content = response.read()
-                    with open(os.path.join(shards_dir, filename), "wb") as f:
-                        f.write(content)
-                    filenames.append(filename)
-                with open(manifest_path, "w") as f:
-                    json.dump(filenames, f)
+        missing = [] if filenames is None else [
+            filename for filename in filenames
+            if not os.path.isfile(os.path.join(shards_dir, filename))
+            or os.path.getsize(os.path.join(shards_dir, filename)) == 0
+        ]
+        if filenames is None or missing:
+            listing_url = f"https://huggingface.co/api/datasets/{repo_id}/parquet/{subset}/{split}"
+            with urllib.request.urlopen(listing_url) as response:
+                shard_urls = json.loads(response.read())
+            expected_filenames = [f"{index:05d}.parquet" for index in range(len(shard_urls))]
+            if filenames is not None and filenames != expected_filenames:
+                raise ValueError(f"Dataset manifest no longer matches the Hub listing: {manifest_path}")
+            filenames = expected_filenames
+            for filename, shard_url in zip(filenames, shard_urls):
+                shard_path = os.path.join(shards_dir, filename)
+                if os.path.isfile(shard_path) and os.path.getsize(shard_path) > 0:
+                    continue
+                print(f"Downloading {shard_url}...")
+                temp_path = shard_path + ".tmp"
+                try:
+                    with urllib.request.urlopen(shard_url) as response, open(temp_path, "wb") as f:
+                        shutil.copyfileobj(response, f)
+                    if os.path.getsize(temp_path) == 0:
+                        raise IOError(f"Downloaded empty dataset shard: {shard_url}")
+                    os.replace(temp_path, shard_path)
+                finally:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+            with open(manifest_path + ".tmp", "w") as f:
+                json.dump(filenames, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(manifest_path + ".tmp", manifest_path)
     with open(manifest_path, "r") as f:
         filenames = json.load(f)
     shard_paths = [os.path.join(shards_dir, filename) for filename in filenames]
