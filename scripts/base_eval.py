@@ -230,7 +230,7 @@ def main():
             output_csv_path = os.path.join(base_dir, "base_eval", f"{model_slug}.csv")
             os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
 
-            with open(output_csv_path, 'w', envoding= 'utf-8', newline='') as f:
+            with open(output_csv_path, 'w', encoding='utf-8', newline='') as f:
                 f.write(f"{'Task':<35}, {'Accuracy':<10}, {'Centered': <10}\n")
                 for label in core_results["results"]:
                     acc = core_results['results'][label]
